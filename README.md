@@ -63,7 +63,9 @@ The PowerShell script or executable must be placed in the same folder as the `fa
 ### Example
 Here is an example command for running Faster Whisper manually:
 Ensure that both run_faster_whisper_xxl.ps1 or the .exe file and faster-whisper-xxl.exe are located in the same folder for the program to run successfully.
-faster-whisper-xxl.exe "path_to_audio.mp3" --device cuda --language en --model medium --output_dir "C:\Output" --output_format txt --task transcribe --best_of 3 --beam_size 5 --patience 1.5 --temperature 1.0
+```markdown faster-whisper-xxl.exe "path_to_audio.mp3" --device cuda --language en --model medium --output_dir "C:\Output" --output_format txt --task transcribe --best_of 3 --beam_size 5 --patience 1.5 --temperature 1.0
+```
+
 
 ## Dependencies
 - PowerShell: Pre-installed on most Windows versions.
