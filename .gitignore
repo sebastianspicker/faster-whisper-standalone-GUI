@@ -1,0 +1,36 @@
+# PowerShell / tooling
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+*.clixml
+
+# User-specific config (copy from the example file)
+run_faster_whisper_xxl.config.json
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+.cursor/
+
+# Build / artifacts
+out/
+dist/
+bin/
+obj/
+TestResults/
+test-results/
+testResults.xml
+coverage/
+.pester/
+.cache/
+
