@@ -166,15 +166,23 @@ $form.Add_FormClosing({
     if ($activeProcess -and -not $activeProcess.HasExited) {
         $msg = "A transcription is still in progress.`n`nYes = Stop transcription and close`nNo = Let it finish in the background, then close`nCancel = Return to the application"
         $result = [System.Windows.Forms.MessageBox]::Show(
+            $form,
             $msg,
             'Process Running',
             [System.Windows.Forms.MessageBoxButtons]::YesNoCancel,
             [System.Windows.Forms.MessageBoxIcon]::Warning
         )
 
+        # The prompt pumps messages, so the timer may have completed the run meanwhile.
+        $stillRunning = $script:ActiveRun -and $script:ActiveRun.Process -and -not $script:ActiveRun.Process.HasExited
+        if (-not $stillRunning) {
+            if ($result -eq [System.Windows.Forms.DialogResult]::Cancel) { $formClosingArgs.Cancel = $true }
+            return
+        }
+
         if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
             try {
-                $activeProcess.Kill()
+                $script:ActiveRun.Process.Kill()
                 $script:StoppedByUser = $true
             } catch {
                 Write-Warning "Failed to terminate process: $($_.Exception.Message)"
@@ -464,6 +472,7 @@ $useInputAsOutput.Add_CheckedChanged({
         }
         else {
             [System.Windows.Forms.MessageBox]::Show(
+                $form,
                 "Please select an audio or video file first before enabling this option.`n`nClick Browse to choose a file.",
                 'Input File Required',
                 [System.Windows.Forms.MessageBoxButtons]::OK,
@@ -482,23 +491,27 @@ $useInputAsOutput.Add_CheckedChanged({
 # Poll for process exit on the UI thread (no event runspace, so script-scope state and controls are reachable).
 $script:ExitPollTimer = New-Object System.Windows.Forms.Timer
 $script:ExitPollTimer.Interval = 250
-$script:ExitPollTimer.Add_Tick({
+# Completes the active run after its process exited: finalize summary, record it, optional sound.
+function script:Complete-ActiveRun {
     $run = $script:ActiveRun
-    if ($null -eq $run -or -not $run.Process.HasExited) { return }
-
-    # Stop polling and release the run BEFORE any dialog (message boxes pump messages and would re-enter Tick)
-    $script:ExitPollTimer.Stop()
     $script:ActiveRun = $null
-
-    $exitCode = $run.Process.ExitCode
-    $summary = Complete-FasterWhisperRun -Run $run -ExitCode $exitCode
+    $summary = Complete-FasterWhisperRun -Run $run -ExitCode $run.Process.ExitCode -StoppedByUser:([bool]$script:StoppedByUser)
     [void]$script:RunSummaries.Add($summary)
-
     if ($summary.PlaySound) {
         [System.Media.SystemSounds]::Asterisk.Play()
     }
+    return $summary
+}
 
-    if (-not $form.IsDisposed) {
+$script:ExitPollTimer.Add_Tick({
+    if ($null -eq $script:ActiveRun -or -not $script:ActiveRun.Process.HasExited) { return }
+
+    # Stop polling BEFORE any dialog (message boxes pump messages and would re-enter Tick)
+    $script:ExitPollTimer.Stop()
+    try {
+        $summary = Complete-ActiveRun
+    }
+    finally {
         $startButton.Enabled = $true
         $closeButton.Enabled = $true
     }
@@ -512,6 +525,7 @@ $script:ExitPollTimer.Add_Tick({
             "$($summary.DurationSeconds) seconds"
         }
         [System.Windows.Forms.MessageBox]::Show(
+            $form,
             "Transcription completed successfully!`n`nOutput saved to:`n$($summary.OutputDirectory)`n`nDuration: $durationText",
             'Transcription Complete',
             [System.Windows.Forms.MessageBoxButtons]::OK,
@@ -519,6 +533,7 @@ $script:ExitPollTimer.Add_Tick({
         ) | Out-Null
     } else {
         [System.Windows.Forms.MessageBox]::Show(
+            $form,
             $summary.ErrorMessage,
             'Transcription Failed',
             [System.Windows.Forms.MessageBoxButtons]::OK,
@@ -537,6 +552,7 @@ function script:Show-RunFailure {
         [System.Windows.Forms.MessageBoxIcon]::Error
     }
     [System.Windows.Forms.MessageBox]::Show(
+        $form,
         $Failure.Message,
         $Failure.Title,
         [System.Windows.Forms.MessageBoxButtons]::OK,
@@ -577,6 +593,7 @@ $startButton.Add_Click({
             -ConfirmExecutable {
                 param($Warning)
                 $warningResult = [System.Windows.Forms.MessageBox]::Show(
+                    $form,
                     "Security Warning: $Warning`n`nDo you want to continue?",
                     'Security Warning',
                     [System.Windows.Forms.MessageBoxButtons]::YesNo,
@@ -764,17 +781,11 @@ finally {
 
 # The form closed while a run was still active (user chose "No = let it finish"): wait for it so its summary is not lost.
 if ($script:ActiveRun) {
-    $run = $script:ActiveRun
-    $script:ActiveRun = $null
-    $p = $run.Process
-    while (-not $p.WaitForExit(200)) { }
-    $exitCode = $p.ExitCode
-    $stoppedByUser = [bool]$script:StoppedByUser
-    $summary = Complete-FasterWhisperRun -Run $run -ExitCode $exitCode -StoppedByUser:$stoppedByUser
-    if ($summary.PlaySound) {
-        [System.Media.SystemSounds]::Asterisk.Play()
+    if (-not $script:ActiveRun.Process.HasExited) {
+        Write-Warning 'Waiting for the running transcription to finish...'
     }
-    [void]$script:RunSummaries.Add($summary)
+    while (-not $script:ActiveRun.Process.WaitForExit(200)) { }
+    $null = Complete-ActiveRun
 }
 
 # Emit all run summaries to pipeline (one per attempted run)

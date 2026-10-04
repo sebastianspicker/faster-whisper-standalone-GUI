@@ -3,7 +3,8 @@
     Resolves the configured executable to a full path, or returns $null when not found.
 
 .DESCRIPTION
-    A bare name is looked up in ApplicationDirectory first, then on PATH (applications only).
+    A bare name is looked up in ApplicationDirectory first (also as <name>.exe when it has no
+    extension, matching how PATH lookup applies PATHEXT), then on PATH (applications only).
     A value containing a path separator must be an existing file (relative values are resolved
     against the current PowerShell location) and is returned as a full path.
 #>
@@ -27,9 +28,13 @@ function Resolve-FasterWhisperExecutable {
     }
 
     if (-not [string]::IsNullOrWhiteSpace($ApplicationDirectory)) {
-        $candidate = Join-Path -Path $ApplicationDirectory -ChildPath $Executable
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            return (Convert-Path -LiteralPath $candidate)
+        $names = @($Executable)
+        if (-not [System.IO.Path]::GetExtension($Executable)) { $names += "$Executable.exe" }
+        foreach ($name in $names) {
+            $candidate = Join-Path -Path $ApplicationDirectory -ChildPath $name
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                return (Convert-Path -LiteralPath $candidate)
+            }
         }
     }
 

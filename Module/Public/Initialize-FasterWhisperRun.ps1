@@ -95,7 +95,8 @@ function Initialize-FasterWhisperRun {
 
     # Validate Language (optional, but if provided should be ISO-639-1)
     if (-not [string]::IsNullOrWhiteSpace($Request.Language)) {
-        if ($Request.Language -notmatch '(?i)^[a-z]{2}$') {
+        # \z, not $: '$' also matches before a trailing newline ("en`n")
+        if ($Request.Language -notmatch '(?i)^[a-z]{2}\z') {
             return Close-FasterWhisperRunWithFailure -Run $run -Title 'Validation Error' -Icon 'Warning' -Message "Invalid language code: '$($Request.Language)'. Please enter a 2-letter language code (e.g. 'en' for English, 'de' for German, 'fr' for French) or leave it empty for auto-detection."
         }
         # Normalize language to lowercase for the executable

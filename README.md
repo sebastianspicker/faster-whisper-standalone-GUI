@@ -1,4 +1,6 @@
-> **Notice:** This repository is provided **as is** and is **no longer actively maintained**. For a maintained alternative with more features, see **[meetily.ai](https://github.com/Zackriya-Solutions/meeting-minutes)**.
+> **Notice:** This repository is provided **as is** and is **no longer actively maintained**.
+>
+> **Better alternatives:** [Buzz](https://github.com/chidiwilliams/buzz) (cross-platform), [Vibe](https://github.com/thewh1teagle/vibe) (cross-platform, whisper.cpp) and [MacWhisper](https://goodsnooze.gumroad.com/l/macwhisper) (macOS) are maintained, more capable, and easier to install than this Windows-only PowerShell wrapper. See [Alternatives & Successors](#alternatives--successors).
 
 # Faster Whisper Standalone GUI (PowerShell)
 
@@ -49,14 +51,14 @@ flowchart LR
   StartClick[User clicks Start]
   BuildSummary[Build summary object]
   Validation[Run validation chain]
-  ShowError[Message box and Add-FailedRunSummary]
+  ShowError[Message box and failed summary]
   StartProcess[Start external process]
-  RegisterExited[Register Exited event and lock UI]
+  RegisterExited[Lock UI and start exit-poll timer]
   ProcessRun[Process runs]
-  ExitedHandler[Exited handler updates summary and adds to RunSummaries]
-  UnlockUI[Unlock UI and cleanup event]
+  ExitedHandler[Timer sees exit, completes summary and adds to RunSummaries]
+  UnlockUI[Unlock UI and show result]
   FormClose[User closes form]
-  WaitProcess[Wait for any still-running process]
+  WaitProcess[Wait for a still-running process and complete its summary]
   EmitPipeline[Emit all RunSummaries to pipeline]
   ScriptStart --> STACheck
   STACheck -->|not STA| Relaunch
@@ -82,7 +84,7 @@ flowchart LR
   WaitProcess --> EmitPipeline
 ```
 
-The script enforces STA execution, builds the WinForms UI, and validates every run before process launch. Validation failures do not start the executable and are converted into failed run summaries so automation still has a complete log. Successful runs register an exit handler, unlock UI controls on completion, and emit structured summaries to the pipeline.
+The script enforces STA execution, builds the WinForms UI, and validates every run before process launch. Validation failures do not start the executable and are converted into failed run summaries so automation still has a complete log. Started runs are polled for exit by a UI-thread timer, which completes the summary and unlocks the UI. All summaries are emitted to the pipeline when the window closes.
 
 ## Lifecycle
 
@@ -92,27 +94,27 @@ From **Start** click to pipeline emission for a single run:
 flowchart TB
   StartClick[Start clicked]
   CreateSummary[Create summary object from UI]
-  Validation[Validation: language, exe path and security, exe exists, input file, path traversal, output dir]
+  Validation[Validation: language, exe path and security, exe resolution, input file, path traversal, output dir]
   ValidationFail[Validation failed]
-  MsgBox[Message box and Add-FailedRunSummary]
+  MsgBox[Message box and failed summary]
   Return[Return to form]
   BuildArgs[Build argument list]
   LockUI[Lock Start and Close buttons]
-  CreateProcess[Create process and register Exited]
-  StartProc[Start process]
+  CreateProcess[Start process via resolved executable path]
+  StartProc[Start exit-poll timer]
   ProcRunning[Process running]
-  OnExit["Exited handler: update summary, optional sound, unlock UI, add to RunSummaries, cleanup"]
+  OnExit["Timer tick: complete summary, optional sound, unlock UI, add to RunSummaries, show result"]
   FormClosed[Form closed]
-  WaitForProc[Wait for CurrentProcess if still running]
+  WaitForProc[Wait for the active run if still running]
   EmitToPipeline[Emit each RunSummaries item to pipeline]
-  StartClick --> CreateSummary
+  StartClick --> LockUI
+  LockUI --> CreateSummary
   CreateSummary --> Validation
   Validation -->|fail| ValidationFail
   ValidationFail --> MsgBox
   MsgBox --> Return
   Validation -->|pass| BuildArgs
-  BuildArgs --> LockUI
-  LockUI --> CreateProcess
+  BuildArgs --> CreateProcess
   CreateProcess --> StartProc
   StartProc --> ProcRunning
   ProcRunning --> OnExit
@@ -121,7 +123,7 @@ flowchart TB
   WaitForProc --> EmitToPipeline
 ```
 
-Each run starts from UI input, creates a summary object, and passes through a strict validation chain. Failed validation branches return to the form immediately with a user-visible error and a recorded failure object. Successful runs launch the process, handle exit events, then emit normalized summary records after form closure.
+Each run starts from UI input, creates a summary object, and passes through a strict validation chain. Failed validation branches return to the form immediately with a user-visible error and a recorded failure object. Successful runs launch the process and are completed when it exits; if the window is closed first, the script waits for the process (or stops it, if you choose so) before emitting all summary records.
 
 ## Features
 
@@ -142,10 +144,12 @@ Each run starts from UI input, creates a summary object, and passes through a st
 
 - Windows (WinForms GUI; not supported on macOS/Linux)
 - PowerShell 7+ (`pwsh`)
-- Faster Whisper standalone executable available:
+- Faster Whisper standalone executable available (looked up in this order):
+  - configured via JSON (`ExecutablePath`; a path with a folder asks for confirmation before use), or
   - in the same folder as the script, or
-  - in `PATH`, or
-  - configured via JSON (`ExecutablePath`)
+  - in `PATH`
+
+  Files with any extension other than `.exe` (for example `.cmd` or `.bat` found via `PATHEXT`) are rejected.
 
 ## Quickstart (GUI)
 
@@ -162,7 +166,7 @@ Select an input file, configure options, click **Start Transcription**, and the 
 
 Create `run_faster_whisper_xxl.config.json` next to `run_faster_whisper_xxl.ps1` (copy from `run_faster_whisper_xxl.config.json.example`).
 
-Supported keys (all optional):
+Supported keys (all optional; invalid values fall back to defaults, `BestOf`/`BeamSize` are limited to 1-10 and `Patience`/`Temperature` to 0.0-2.0):
 
 - `ExecutablePath` (string)
 - `Device` (`cpu` or `cuda`)
@@ -214,42 +218,47 @@ pwsh -NoProfile -STA -Command '.\run_faster_whisper_xxl.ps1 | Export-Csv -NoType
 
 ## Run summary output
 
-The script emits one object per run with properties such as:
+When the window closes, the script emits one object per attempted run (including runs rejected by validation) with these properties, always in this order:
 
 - `InputFile`, `OutputDirectory`, `Device`, `Language`, `Model`, `OutputFormat`, `Task`
 - `BestOf`, `BeamSize`, `Patience`, `Temperature`
 - `PlaySound`, `ShowCliProgress`
 - `Executable`, `StartTime`, `EndTime`, `DurationSeconds`, `ExitCode`, `Succeeded`, `ErrorMessage`
 
+`ExitCode` is empty when the engine was never started. Fields that validation did not reach (for example `Executable` after an invalid language) stay empty. A run you stop by closing the window and choosing **Yes** has `ErrorMessage` `Transcription stopped by user.`
+
 ## Validation (build / run / test)
 
-Run from the repository root (PowerShell on Windows):
+Run from the repository root with PowerShell 7 (tests and lint also run on macOS/Linux; the GUI needs Windows). Requires Pester 5+ and PSScriptAnalyzer.
 
 | Action | Command |
 |--------|---------|
-| **Lint** | `pwsh -NoProfile -Command 'Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1'` |
-| **Test** | `pwsh -NoProfile -Command 'Invoke-Pester'` |
+| **Lint** | `pwsh -NoProfile -Command 'Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1 -EnableExit'` |
+| **Test** | `pwsh -NoProfile -Command 'Invoke-Pester -Path tests -CI'` |
 | **Run GUI** | `.\run_faster_whisper_xxl.ps1` |
 
-There is no separate build step; the script and module are run directly.
+There is no separate build step; the script and module are run directly. CI (`.github/workflows/ci.yml`) runs the same lint and test commands on `windows-latest`.
 
 ## Repository layout
 
 ```
 faster-whisper-standalone-GUI/
-├── .editorconfig, .gitattributes, .gitignore
-├── ARCHIVE.md, CONTRIBUTING.md, LICENSE, PSScriptAnalyzerSettings.psd1
-├── README.md, SECURITY.md
-├── run_faster_whisper_xxl.ps1
+├── run_faster_whisper_xxl.ps1        Entry point: STA bootstrap, WinForms window, run polling, pipeline output
 ├── run_faster_whisper_xxl.config.json.example
-├── Module/
-│   ├── FasterWhisperStandaloneGui.psd1, FasterWhisperStandaloneGui.psm1
-│   ├── Private/   (config helpers: Get-ConfigBoolOrDefault, Get-ConfigNumberOrDefault, Get-ConfigStringOrDefault, Get-JsonObjectFromFile)
-│   └── Public/    (Get-FasterWhisperArgumentList, Get-FasterWhisperGuiConfig, Get-FasterWhisperGuiDefaultConfig,
-│                   Get-FasterWhisperOutputDirectory, Get-FasterWhisperAllowedValueMap (alias: Get-FasterWhisperAllowedValues), Test-PathTraversalSafe, Test-SafeExecutablePath)
-└── tests/
-    └── FasterWhisperStandaloneGui.Tests.ps1
+├── Module/                           FasterWhisperStandaloneGui module: all non-UI logic, loads on any OS
+│   ├── FasterWhisperStandaloneGui.psd1   Manifest; FunctionsToExport is the only export list
+│   ├── FasterWhisperStandaloneGui.psm1   Dot-sources Private/ then Public/
+│   ├── Public/    Get-FasterWhisperOptionCatalog, Get-FasterWhisperGuiConfig,
+│   │              Initialize-FasterWhisperRun, Invoke-FasterWhisperRun, Complete-FasterWhisperRun
+│   └── Private/   config parsing, defaults, executable resolution and safety checks,
+│                  argument list, output directory, summary finalization
+├── tests/         Pester tests: Settings (catalog, config), Run (request to process and summary),
+│                  PathSafety (security checks), ScriptContract (script vs. module exports)
+├── PSScriptAnalyzerSettings.psd1     Lint configuration (severity Error, Warning)
+└── .github/       CI workflow and Dependabot
 ```
+
+Dependency direction: the entry script depends on the module's public functions; the module never references WinForms. Put new validation, settings or process logic in the module (one function per file, private unless the script needs it) and keep the script limited to UI.
 
 For archive notice and maintained alternative, see [ARCHIVE.md](ARCHIVE.md).
 

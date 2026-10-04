@@ -3,8 +3,9 @@
     Returns the allowed values and numeric ranges for the Faster Whisper options.
 
 .DESCRIPTION
-    Single source of truth for the option values accepted by the GUI, the config loader and the
-    run validation. Callers use it to populate dropdowns and slider limits.
+    Single source of truth for the option values offered by the GUI (dropdowns, slider limits)
+    and enforced by the config loader. Initialize-FasterWhisperRun does not re-check request
+    values against it; callers pass values chosen from these lists.
 
 .OUTPUTS
     System.Collections.Hashtable

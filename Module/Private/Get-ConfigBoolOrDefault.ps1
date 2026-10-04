@@ -22,6 +22,8 @@ function Get-ConfigBoolOrDefault {
             $s = $value.Trim().ToLowerInvariant()
             if ($s -eq 'true') { return $true }
             if ($s -eq 'false') { return $false }
+            # Any other string ("no", "0", "off") is invalid; [bool] would make it $true
+            return $DefaultValue
         }
         return [bool]$value
     }
