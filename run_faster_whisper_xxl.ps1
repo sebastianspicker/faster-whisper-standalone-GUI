@@ -5,7 +5,7 @@
 .DESCRIPTION
     This script provides a WinForms user interface to configure and start a single run of an external transcription tool (the configured executable).
     The GUI collects input file, device, language, model, output directory, output format, task, and decoding parameters (best_of, beam_size, patience, temperature).
-    When the process finishes (or fails validation), the script writes exactly one summary object to the pipeline that can be piped to Export-Csv, ConvertTo-Json, Where-Object, etc.
+    The script writes one summary object per attempted run (finished or failed validation) to the pipeline when the window closes; it can be piped to Export-Csv, ConvertTo-Json, Where-Object, etc.
     All human-friendly interaction (dialogs, message boxes) is handled via the GUI; the pipeline output remains machine-friendly.
 
 .PARAMETER None
@@ -41,7 +41,7 @@
 
 .DESCRIPTION (CONFIGURATION)
     The script supports optional JSON-based configuration.
-    The JSON file path is defined inside the script (placeholder: PATH\TO\JSON\run_faster_whisper_xxl.config.json).
+    The JSON file is run_faster_whisper_xxl.config.json, located next to the script.
     If the file is missing, empty, unreadable, or contains invalid JSON, the script silently falls back to built-in defaults.
     Supported JSON keys (all optional) match the GUI settings and are used only to pre-populate the GUI:
     ExecutablePath, Device, Language, Model, OutputFormat, Task, BestOf, BeamSize, Patience, Temperature,
@@ -123,29 +123,17 @@ $moduleManifestPath = Join-Path -Path $PSScriptRoot -ChildPath 'Module/FasterWhi
 Import-Module -Name $moduleManifestPath -Force -ErrorAction Stop
 
 # --- Load configuration ---
-$defaultConfig = Get-FasterWhisperGuiDefaultConfig
+$applicationDirectory = $PSScriptRoot
+$optionCatalog = Get-FasterWhisperOptionCatalog
 $configJsonPath = Join-Path -Path $PSScriptRoot -ChildPath 'run_faster_whisper_xxl.config.json'
-$config = Get-FasterWhisperGuiConfig -ConfigPath $configJsonPath -DefaultConfig $defaultConfig
+$config = Get-FasterWhisperGuiConfig -ConfigPath $configJsonPath
 
-# Collect run summaries here; emitted to pipeline when form closes (event output cannot reach main pipeline)
-$script:RunSummaries = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
-# Track current process so we can wait for it after form closes (P0: no lost summary when user closes while running)
-$script:CurrentProcess = $null
-
-# Script-level helper: record a failed run summary and add to pipeline collection (deduplicates 9 failure paths)
-function script:Add-FailedRunSummary {
-    param(
-        [Parameter(Mandatory)] $Summary,
-        [Parameter(Mandatory)] [string] $ErrorMessage
-    )
-    if ($null -eq $Summary) { return }
-    $Summary.ErrorMessage = $ErrorMessage
-    $Summary | Add-Member -MemberType NoteProperty -Name Succeeded -Value $false -Force
-    $Summary | Add-Member -MemberType NoteProperty -Name EndTime -Value (Get-Date) -Force
-    $Summary.DurationSeconds = [Math]::Round( ($Summary.EndTime - $Summary.StartTime).TotalSeconds, 1 )
-    $Summary.ExitCode = $null
-    [void]$script:RunSummaries.Add($Summary)
-}
+# Collect run summaries here; emitted to pipeline when form closes
+$script:RunSummaries = [System.Collections.Generic.List[object]]::new()
+# The run whose process is still being polled/awaited (set on start, cleared when completed)
+$script:ActiveRun = $null
+# Set when the user chose "Stop transcription and close" so the summary records it
+$script:StoppedByUser = $false
 
 # --- Main Form ---
 # Layout constants for Transcription tab (single place to adjust horizontal layout)
@@ -174,7 +162,8 @@ $form.Add_FormClosing({
     param($eventSender, $formClosingArgs)
     $null = $eventSender  # Required by WinForms event delegate signature
 
-    if ($script:CurrentProcess -and -not $script:CurrentProcess.HasExited) {
+    $activeProcess = if ($script:ActiveRun) { $script:ActiveRun.Process } else { $null }
+    if ($activeProcess -and -not $activeProcess.HasExited) {
         $msg = "A transcription is still in progress.`n`nYes = Stop transcription and close`nNo = Let it finish in the background, then close`nCancel = Return to the application"
         $result = [System.Windows.Forms.MessageBox]::Show(
             $msg,
@@ -185,13 +174,17 @@ $form.Add_FormClosing({
 
         if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
             try {
-                $script:CurrentProcess.Kill()
+                $activeProcess.Kill()
+                $script:StoppedByUser = $true
             } catch {
                 Write-Warning "Failed to terminate process: $($_.Exception.Message)"
             }
+            # The script completes the run after ShowDialog() returns
+            $script:ExitPollTimer.Stop()
         }
         elseif ($result -eq [System.Windows.Forms.DialogResult]::No) {
-            # Let it run in background, but the script will wait after ShowDialog()
+            # Let it run in background; the script waits after ShowDialog() and completes the run
+            $script:ExitPollTimer.Stop()
         }
         else {
             $formClosingArgs.Cancel = $true
@@ -246,8 +239,7 @@ $deviceBox = New-Object System.Windows.Forms.ComboBox
 $deviceBox.Location = [Drawing.Point]::new($script:GuiInputLeft,60)
 $deviceBox.Size     = [Drawing.Size]::new($script:GuiInputWidth,20)
 $deviceBox.DropDownStyle = 'DropDownList'
-$allowedValues = Get-FasterWhisperAllowedValueMap
-[void]$deviceBox.Items.AddRange($allowedValues.Devices)
+[void]$deviceBox.Items.AddRange($optionCatalog.Devices)
 if ($deviceBox.Items.Contains($config.Device)) { $deviceBox.SelectedItem = $config.Device } else { $deviceBox.SelectedIndex = 0 }
 $tabTranscription.Controls.Add($deviceBox)
 
@@ -275,7 +267,7 @@ $modelBox = New-Object System.Windows.Forms.ComboBox
 $modelBox.Location    = [Drawing.Point]::new($script:GuiInputLeft,140)
 $modelBox.Size        = [Drawing.Size]::new($script:GuiInputWidth,20)
 $modelBox.DropDownStyle = 'DropDownList'
-[void]$modelBox.Items.AddRange($allowedValues.Models)
+[void]$modelBox.Items.AddRange($optionCatalog.Models)
 if ($modelBox.Items.Contains($config.Model)) { $modelBox.SelectedItem = $config.Model } else { $modelBox.SelectedIndex = 0 }
 $tabTranscription.Controls.Add($modelBox)
 
@@ -324,7 +316,7 @@ $formatBox = New-Object System.Windows.Forms.ComboBox
 $formatBox.Location = [Drawing.Point]::new($script:GuiInputLeft,240)
 $formatBox.Size     = [Drawing.Size]::new($script:GuiInputWidth,20)
 $formatBox.DropDownStyle = 'DropDownList'
-[void]$formatBox.Items.AddRange($allowedValues.Formats)
+[void]$formatBox.Items.AddRange($optionCatalog.Formats)
 if ($formatBox.Items.Contains($config.OutputFormat)) { $formatBox.SelectedItem = $config.OutputFormat } else { $formatBox.SelectedIndex = 0 }
 $tabTranscription.Controls.Add($formatBox)
 
@@ -339,96 +331,65 @@ $taskBox = New-Object System.Windows.Forms.ComboBox
 $taskBox.Location = [Drawing.Point]::new($script:GuiInputLeft,280)
 $taskBox.Size     = [Drawing.Size]::new($script:GuiInputWidth,20)
 $taskBox.DropDownStyle = 'DropDownList'
-[void]$taskBox.Items.AddRange($allowedValues.Tasks)
+[void]$taskBox.Items.AddRange($optionCatalog.Tasks)
 if ($taskBox.Items.Contains($config.Task)) { $taskBox.SelectedItem = $config.Task } else { $taskBox.SelectedIndex = 0 }
 $tabTranscription.Controls.Add($taskBox)
 
 # --- Sliders for Best Of/Beam Size/Patience/Temperature ---
-$bestOfLabel = New-Object System.Windows.Forms.Label
-$bestOfLabel.Location = [Drawing.Point]::new($script:GuiLabelLeft,320)
-$bestOfLabel.Size     = [Drawing.Size]::new($script:GuiLabelWidth,20)
-$bestOfLabel.Text     = 'Best Of (candidates)'
-$tabTranscription.Controls.Add($bestOfLabel)
+# Builds label + TrackBar + value label row; -Tenths: slider is in tenths and the value label shows value / 10.
+function script:Add-SliderRow {
+    param(
+        [Parameter(Mandatory)] $Parent,
+        [Parameter(Mandatory)] [string] $LabelText,
+        [Parameter(Mandatory)] [int] $Top,
+        [Parameter(Mandatory)] [int] $Minimum,
+        [Parameter(Mandatory)] [int] $Maximum,
+        [Parameter(Mandatory)] [int] $Value,
+        [switch] $Tenths
+    )
 
-$bestOfSlider = New-Object System.Windows.Forms.TrackBar
-$bestOfSlider.Location = [Drawing.Point]::new($script:GuiInputLeft,320)
-$bestOfSlider.Size     = [Drawing.Size]::new($script:GuiSliderWidth,$script:GuiSliderHeight)
-$bestOfSlider.Minimum  = 1
-$bestOfSlider.Maximum  = 10
-$bestOfSlider.Value    = [Math]::Min([Math]::Max($config.BestOf,1),10)
-$tabTranscription.Controls.Add($bestOfSlider)
+    $label = New-Object System.Windows.Forms.Label
+    $label.Location = [Drawing.Point]::new($script:GuiLabelLeft,$Top)
+    $label.Size     = [Drawing.Size]::new($script:GuiLabelWidth,20)
+    $label.Text     = $LabelText
+    $Parent.Controls.Add($label)
 
-$bestOfValue = New-Object System.Windows.Forms.Label
-$bestOfValue.Location  = [Drawing.Point]::new($script:GuiValueLeft,320)
-$bestOfValue.Size      = [Drawing.Size]::new(50,20)
-$bestOfValue.Text      = $bestOfSlider.Value
-$tabTranscription.Controls.Add($bestOfValue)
-$bestOfSlider.add_ValueChanged({ $bestOfValue.Text = $bestOfSlider.Value })
+    $slider = New-Object System.Windows.Forms.TrackBar
+    $slider.Location = [Drawing.Point]::new($script:GuiInputLeft,$Top)
+    $slider.Size     = [Drawing.Size]::new($script:GuiSliderWidth,$script:GuiSliderHeight)
+    $slider.Minimum  = $Minimum
+    $slider.Maximum  = $Maximum
+    if ($Tenths) { $slider.TickFrequency = 1 }
+    $slider.Value    = $Value
+    $Parent.Controls.Add($slider)
 
-$beamSizeLabel = New-Object System.Windows.Forms.Label
-$beamSizeLabel.Location = [Drawing.Point]::new($script:GuiLabelLeft,370)
-$beamSizeLabel.Size     = [Drawing.Size]::new($script:GuiLabelWidth,20)
-$beamSizeLabel.Text     = 'Beam Size (search width)'
-$tabTranscription.Controls.Add($beamSizeLabel)
+    $valueLabel = New-Object System.Windows.Forms.Label
+    $valueLabel.Location = [Drawing.Point]::new($script:GuiValueLeft,$Top)
+    $valueLabel.Size     = [Drawing.Size]::new(50,20)
+    $Parent.Controls.Add($valueLabel)
 
-$beamSizeSlider = New-Object System.Windows.Forms.TrackBar
-$beamSizeSlider.Location = [Drawing.Point]::new($script:GuiInputLeft,370)
-$beamSizeSlider.Size     = [Drawing.Size]::new($script:GuiSliderWidth,$script:GuiSliderHeight)
-$beamSizeSlider.Minimum  = 1
-$beamSizeSlider.Maximum  = 10
-$beamSizeSlider.Value    = [Math]::Min([Math]::Max($config.BeamSize,1),10)
-$tabTranscription.Controls.Add($beamSizeSlider)
+    $format = {
+        param($trackBar)
+        if ($Tenths) { ($trackBar.Value / 10.0).ToString([System.Globalization.CultureInfo]::InvariantCulture) }
+        else { [string]$trackBar.Value }
+    }.GetNewClosure()
+    $valueLabel.Text = & $format $slider
+    $slider.add_ValueChanged({ $valueLabel.Text = & $format $slider }.GetNewClosure())
 
-$beamSizeValue = New-Object System.Windows.Forms.Label
-$beamSizeValue.Location  = [Drawing.Point]::new($script:GuiValueLeft,370)
-$beamSizeValue.Size      = [Drawing.Size]::new(50,20)
-$beamSizeValue.Text      = $beamSizeSlider.Value
-$tabTranscription.Controls.Add($beamSizeValue)
-$beamSizeSlider.add_ValueChanged({ $beamSizeValue.Text = $beamSizeSlider.Value })
+    return $slider
+}
 
-$patienceLabel = New-Object System.Windows.Forms.Label
-$patienceLabel.Location = [Drawing.Point]::new($script:GuiLabelLeft,420)
-$patienceLabel.Size     = [Drawing.Size]::new($script:GuiLabelWidth,20)
-$patienceLabel.Text     = 'Patience (1.0 = default)'
-$tabTranscription.Controls.Add($patienceLabel)
-
-$patienceSlider = New-Object System.Windows.Forms.TrackBar
-$patienceSlider.Location = [Drawing.Point]::new($script:GuiInputLeft,420)
-$patienceSlider.Size     = [Drawing.Size]::new($script:GuiSliderWidth,$script:GuiSliderHeight)
-$patienceSlider.Minimum  = 0      # 0.0
-$patienceSlider.Maximum  = 20     # 2.0
-$patienceSlider.TickFrequency = 1
-$patienceSlider.Value    = [int]([Math]::Min([Math]::Max($config.Patience,0.0),2.0) * 10)
-$tabTranscription.Controls.Add($patienceSlider)
-
-$patienceValueLabel = New-Object System.Windows.Forms.Label
-$patienceValueLabel.Location  = [Drawing.Point]::new($script:GuiValueLeft,420)
-$patienceValueLabel.Size      = [Drawing.Size]::new(50,20)
-$patienceValueLabel.Text      = ($patienceSlider.Value / 10.0).ToString([System.Globalization.CultureInfo]::InvariantCulture)
-$tabTranscription.Controls.Add($patienceValueLabel)
-$patienceSlider.add_ValueChanged({ $patienceValueLabel.Text = ($patienceSlider.Value / 10.0).ToString([System.Globalization.CultureInfo]::InvariantCulture) })
-
-$temperatureLabel = New-Object System.Windows.Forms.Label
-$temperatureLabel.Location = [Drawing.Point]::new($script:GuiLabelLeft,470)
-$temperatureLabel.Size     = [Drawing.Size]::new($script:GuiLabelWidth,20)
-$temperatureLabel.Text     = 'Temperature (0 = precise)'
-$tabTranscription.Controls.Add($temperatureLabel)
-
-$temperatureSlider = New-Object System.Windows.Forms.TrackBar
-$temperatureSlider.Location = [Drawing.Point]::new($script:GuiInputLeft,470)
-$temperatureSlider.Size     = [Drawing.Size]::new($script:GuiSliderWidth,$script:GuiSliderHeight)
-$temperatureSlider.Minimum  = 0      # 0.0
-$temperatureSlider.Maximum  = 20     # 2.0
-$temperatureSlider.TickFrequency = 1
-$temperatureSlider.Value    = [int]([Math]::Min([Math]::Max($config.Temperature,0.0),2.0) * 10)
-$tabTranscription.Controls.Add($temperatureSlider)
-
-$temperatureValueLabel = New-Object System.Windows.Forms.Label
-$temperatureValueLabel.Location  = [Drawing.Point]::new($script:GuiValueLeft,470)
-$temperatureValueLabel.Size      = [Drawing.Size]::new(50,20)
-$temperatureValueLabel.Text      = ($temperatureSlider.Value / 10.0).ToString([System.Globalization.CultureInfo]::InvariantCulture)
-$tabTranscription.Controls.Add($temperatureValueLabel)
-$temperatureSlider.add_ValueChanged({ $temperatureValueLabel.Text = ($temperatureSlider.Value / 10.0).ToString([System.Globalization.CultureInfo]::InvariantCulture) })
+$bestOfSlider = Add-SliderRow -Parent $tabTranscription -LabelText 'Best Of (candidates)' -Top 320 `
+    -Minimum $optionCatalog.BestOf.Minimum -Maximum $optionCatalog.BestOf.Maximum -Value $config.BestOf
+$beamSizeSlider = Add-SliderRow -Parent $tabTranscription -LabelText 'Beam Size (search width)' -Top 370 `
+    -Minimum $optionCatalog.BeamSize.Minimum -Maximum $optionCatalog.BeamSize.Maximum -Value $config.BeamSize
+# Patience/Temperature sliders are in tenths (0..20 = 0.0..2.0)
+$patienceSlider = Add-SliderRow -Parent $tabTranscription -LabelText 'Patience (1.0 = default)' -Top 420 -Tenths `
+    -Minimum ([int]($optionCatalog.Patience.Minimum * 10)) -Maximum ([int]($optionCatalog.Patience.Maximum * 10)) `
+    -Value ([int]($config.Patience * 10))
+$temperatureSlider = Add-SliderRow -Parent $tabTranscription -LabelText 'Temperature (0 = precise)' -Top 470 -Tenths `
+    -Minimum ([int]($optionCatalog.Temperature.Minimum * 10)) -Maximum ([int]($optionCatalog.Temperature.Maximum * 10)) `
+    -Value ([int]($config.Temperature * 10))
 
 # --- Checkboxes (Sound/Progress) ---
 $confirmationSoundCheckbox = New-Object System.Windows.Forms.CheckBox
@@ -517,6 +478,72 @@ $useInputAsOutput.Add_CheckedChanged({
     }
 })
 
+# --- Run lifecycle ---
+# Poll for process exit on the UI thread (no event runspace, so script-scope state and controls are reachable).
+$script:ExitPollTimer = New-Object System.Windows.Forms.Timer
+$script:ExitPollTimer.Interval = 250
+$script:ExitPollTimer.Add_Tick({
+    $run = $script:ActiveRun
+    if ($null -eq $run -or -not $run.Process.HasExited) { return }
+
+    # Stop polling and release the run BEFORE any dialog (message boxes pump messages and would re-enter Tick)
+    $script:ExitPollTimer.Stop()
+    $script:ActiveRun = $null
+
+    $exitCode = $run.Process.ExitCode
+    $summary = Complete-FasterWhisperRun -Run $run -ExitCode $exitCode
+    [void]$script:RunSummaries.Add($summary)
+
+    if ($summary.PlaySound) {
+        [System.Media.SystemSounds]::Asterisk.Play()
+    }
+
+    if (-not $form.IsDisposed) {
+        $startButton.Enabled = $true
+        $closeButton.Enabled = $true
+    }
+
+    if ($summary.Succeeded) {
+        $durationText = if ($summary.DurationSeconds -ge 60) {
+            $mins = [Math]::Floor($summary.DurationSeconds / 60)
+            $secs = [Math]::Round($summary.DurationSeconds % 60)
+            "${mins} min ${secs} sec"
+        } else {
+            "$($summary.DurationSeconds) seconds"
+        }
+        [System.Windows.Forms.MessageBox]::Show(
+            "Transcription completed successfully!`n`nOutput saved to:`n$($summary.OutputDirectory)`n`nDuration: $durationText",
+            'Transcription Complete',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information
+        ) | Out-Null
+    } else {
+        [System.Windows.Forms.MessageBox]::Show(
+            $summary.ErrorMessage,
+            'Transcription Failed',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        ) | Out-Null
+    }
+})
+
+# Show a failure reported by the module (Title $null = silent failure, no message box)
+function script:Show-RunFailure {
+    param([Parameter(Mandatory)] $Failure)
+    if ($null -eq $Failure.Title) { return }
+    $icon = if ($Failure.Icon -eq 'Warning') {
+        [System.Windows.Forms.MessageBoxIcon]::Warning
+    } else {
+        [System.Windows.Forms.MessageBoxIcon]::Error
+    }
+    [System.Windows.Forms.MessageBox]::Show(
+        $Failure.Message,
+        $Failure.Title,
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        $icon
+    ) | Out-Null
+}
+
 # --- Start Operation Handler ---
 $startButton.Add_Click({
 
@@ -524,329 +551,69 @@ $startButton.Add_Click({
     $startButton.Enabled = $false
     $closeButton.Enabled = $false
 
-  $processLaunched = $false
-  try {
+    $processLaunched = $false
+    try {
+        $request = [pscustomobject]@{
+            InputFile                 = $inputBox.Text
+            OutputDirectory           = $outputBox.Text
+            UseInputDirectoryAsOutput = $useInputAsOutput.Checked
+            Device                    = $deviceBox.SelectedItem
+            Language                  = $languageBox.Text
+            Model                     = $modelBox.SelectedItem
+            OutputFormat              = $formatBox.SelectedItem
+            Task                      = $taskBox.SelectedItem
+            BestOf                    = $bestOfSlider.Value
+            BeamSize                  = $beamSizeSlider.Value
+            Patience                  = $patienceSlider.Value / 10.0
+            Temperature               = $temperatureSlider.Value / 10.0
+            PlaySound                 = $confirmationSoundCheckbox.Checked
+            ShowCliProgress           = $progressCheckbox.Checked
+        }
 
-    # Build an object to capture the run summary (used when process exits)
-    $summary = [pscustomobject]@{
-        InputFile        = $null
-        OutputDirectory  = $null
-        Device           = $null
-        Language         = $null
-        Model            = $null
-        OutputFormat     = $null
-        Task             = $null
-        BestOf           = $null
-        BeamSize         = $null
-        Patience         = $null
-        Temperature      = $null
-        PlaySound        = $null
-        ShowCliProgress  = $null
-        Executable       = $null
-        StartTime        = Get-Date
-        EndTime          = $null
-        DurationSeconds  = $null
-        ExitCode         = $null
-        Succeeded        = $false
-        ErrorMessage     = $null
-    }
+        $run = Initialize-FasterWhisperRun `
+            -Request $request `
+            -ExecutablePath $config.ExecutablePath `
+            -ApplicationDirectory $applicationDirectory `
+            -ConfirmExecutable {
+                param($Warning)
+                $warningResult = [System.Windows.Forms.MessageBox]::Show(
+                    "Security Warning: $Warning`n`nDo you want to continue?",
+                    'Security Warning',
+                    [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                    [System.Windows.Forms.MessageBoxIcon]::Warning
+                )
+                return ($warningResult -eq [System.Windows.Forms.DialogResult]::Yes)
+            }
 
-    $summary.InputFile   = $inputBox.Text
-    $summary.Device      = $deviceBox.SelectedItem
-    $summary.Language    = $languageBox.Text
-    $summary.Model       = $modelBox.SelectedItem
-    $summary.OutputFormat = $formatBox.SelectedItem
-    $summary.Task        = $taskBox.SelectedItem
-    $summary.BestOf      = $bestOfSlider.Value
-    $summary.BeamSize    = $beamSizeSlider.Value
-    $summary.PlaySound   = $confirmationSoundCheckbox.Checked
-    $summary.ShowCliProgress = $progressCheckbox.Checked
+        # Show the normalized (lowercase) language code when the module accepted a 2-letter code
+        if ($run.Language -and $run.Language -cne $languageBox.Text -and $run.Language -match '^[a-z]{2}$') {
+            $languageBox.Text = $run.Language
+        }
 
-    # Determine patience and temperature as invariant strings
-    $invCulture = [System.Globalization.CultureInfo]::InvariantCulture
-    $patienceValue = [string]::Format($invCulture, '{0:0.0}', ($patienceSlider.Value / 10.0))
-    $temperatureValue = [string]::Format($invCulture, '{0:0.0}', ($temperatureSlider.Value / 10.0))
-
-    $summary.Patience    = [double]$patienceValue
-    $summary.Temperature = [double]$temperatureValue
-
-    # Validate Language (optional, but if provided should be ISO-639-1)
-    if (-not [string]::IsNullOrWhiteSpace($languageBox.Text)) {
-        if ($languageBox.Text -notmatch '(?i)^[a-z]{2}$') {
-            $summary.ErrorMessage = "Invalid language code: '$($languageBox.Text)'. Please enter a 2-letter language code (e.g. 'en' for English, 'de' for German, 'fr' for French) or leave it empty for auto-detection."
-            [System.Windows.Forms.MessageBox]::Show(
-                $summary.ErrorMessage,
-                'Validation Error',
-                [System.Windows.Forms.MessageBoxButtons]::OK,
-                [System.Windows.Forms.MessageBoxIcon]::Warning
-            ) | Out-Null
-            Add-FailedRunSummary -Summary $summary -ErrorMessage $summary.ErrorMessage
+        if ($null -ne $run.Failure) {
+            [void]$script:RunSummaries.Add($run.Summary)
+            Show-RunFailure -Failure $run.Failure
             return
         }
-        # Normalize language to lowercase for the executable
-        $languageBox.Text = $languageBox.Text.ToLowerInvariant()
-    }
 
-    # Resolve executable path (configurable) with security validation
-    $exe = if (-not [string]::IsNullOrWhiteSpace($config.ExecutablePath)) {
-        $config.ExecutablePath
-    }
-    else {
-        'faster-whisper-xxl.exe'
-    }
-    
-    # Security validation for executable path
-    $exeValidationResult = Test-SafeExecutablePath -ExecutablePath $exe
-    if (-not $exeValidationResult.IsValid) {
-        $summary.ErrorMessage = "The configured executable path is not allowed for security reasons: $($exeValidationResult.Message)`n`nPlease check the 'ExecutablePath' setting in your config JSON file."
-        [System.Windows.Forms.MessageBox]::Show(
-            $summary.ErrorMessage,
-            'Security Error',
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Error
-        ) | Out-Null
-        Add-FailedRunSummary -Summary $summary -ErrorMessage $summary.ErrorMessage
-        return
-    }
-    if ($exeValidationResult.Warning) {
-        $warningResult = [System.Windows.Forms.MessageBox]::Show(
-            "Security Warning: $($exeValidationResult.Warning)`n`nDo you want to continue?",
-            'Security Warning',
-            [System.Windows.Forms.MessageBoxButtons]::YesNo,
-            [System.Windows.Forms.MessageBoxIcon]::Warning
-        )
-        if ($warningResult -ne [System.Windows.Forms.DialogResult]::Yes) {
-            $summary.ErrorMessage = "User cancelled due to security warning."
-            Add-FailedRunSummary -Summary $summary -ErrorMessage $summary.ErrorMessage
+        if (-not (Invoke-FasterWhisperRun -Run $run)) {
+            [void]$script:RunSummaries.Add($run.Summary)
+            Show-RunFailure -Failure $run.Failure
             return
         }
-    }
 
-    $summary.Executable = $exe
-
-    # Validate executable: use Test-Path for absolute paths, Get-Command for names in PATH
-    $exeExists = if ($exe -match '[/\\]') {
-        Test-Path -LiteralPath $exe -PathType Leaf
-    } else {
-        $null -ne (Get-Command -Name $exe -ErrorAction SilentlyContinue)
-    }
-    if (-not $exeExists) {
-        $summary.ErrorMessage = "Transcription engine not found: $exe`n`nTo fix this:`n1. Download faster-whisper-xxl.exe and place it in the same folder as this script.`n2. Or add its location to your system PATH.`n3. Or set 'ExecutablePath' in the config JSON file."
-        [System.Windows.Forms.MessageBox]::Show(
-            $summary.ErrorMessage,
-            'Transcription Engine Not Found',
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Error
-        ) | Out-Null
-
-        Add-FailedRunSummary -Summary $summary -ErrorMessage $summary.ErrorMessage
-        return
-    }
-
-    # Validate input file
-    if ([string]::IsNullOrWhiteSpace($inputBox.Text) -or
-        -not [System.IO.File]::Exists($inputBox.Text)) {
-
-        $summary.ErrorMessage = "No input file selected or file not found.`n`nPlease click Browse to select an audio or video file (MP3, WAV, MP4)."
-        [System.Windows.Forms.MessageBox]::Show(
-            $summary.ErrorMessage,
-            'Input File Required',
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Warning
-        ) | Out-Null
-
-        Add-FailedRunSummary -Summary $summary -ErrorMessage $summary.ErrorMessage
-        return
-    }
-
-    if (-not (Test-PathTraversalSafe -Path $inputBox.Text)) {
-        $summary.ErrorMessage = "The input file path appears unsafe.`nPlease select a file using the Browse button instead of typing the path manually."
-        [System.Windows.Forms.MessageBox]::Show(
-            $summary.ErrorMessage,
-            'Error',
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Error
-        ) | Out-Null
-        Add-FailedRunSummary -Summary $summary -ErrorMessage $summary.ErrorMessage
-        return
-    }
-
-    # Determine output directory
-    $outputDir = Get-FasterWhisperOutputDirectory `
-        -InputFile $inputBox.Text `
-        -OutputDirectory $outputBox.Text `
-        -UseInputDirectoryAsOutput $useInputAsOutput.Checked
-
-    $summary.OutputDirectory = $outputDir
-
-    if (-not (Test-PathTraversalSafe -Path $outputDir)) {
-        $summary.ErrorMessage = "The output directory path appears unsafe.`nPlease select a folder using the Browse button instead of typing the path manually."
-        [System.Windows.Forms.MessageBox]::Show(
-            $summary.ErrorMessage,
-            'Error',
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Error
-        ) | Out-Null
-        Add-FailedRunSummary -Summary $summary -ErrorMessage $summary.ErrorMessage
-        return
-    }
-
-    try {
-        if (-not [System.IO.Directory]::Exists($outputDir)) {
-            [System.IO.Directory]::CreateDirectory($outputDir) | Out-Null
-        }
-    }
-    catch {
-        $summary.ErrorMessage = "Could not create or access the output folder:`n$outputDir`n`nPlease check that you have write permissions to this location, or choose a different output folder.`n`nDetails: $($_.Exception.Message)"
-        [System.Windows.Forms.MessageBox]::Show(
-            $summary.ErrorMessage,
-            'Error',
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Error
-        ) | Out-Null
-
-        Add-FailedRunSummary -Summary $summary -ErrorMessage $summary.ErrorMessage
-        return
-    }
-
-    # Build arguments (passed as array to Start-Process/ProcessStartInfo to handle quoting automatically)
-    $argList = Get-FasterWhisperArgumentList `
-        -InputFile $inputBox.Text `
-        -Device $deviceBox.SelectedItem `
-        -Language $languageBox.Text `
-        -Model $modelBox.SelectedItem `
-        -OutputDirectory $outputDir `
-        -OutputFormat $formatBox.SelectedItem `
-        -Task $taskBox.SelectedItem `
-        -BestOf $bestOfSlider.Value `
-        -BeamSize $beamSizeSlider.Value `
-        -Patience $patienceValue `
-        -Temperature $temperatureValue `
-        -PlayConfirmationSound $confirmationSoundCheckbox.Checked `
-        -ShowCliProgress $progressCheckbox.Checked
-
-    # Create process object
-    $p = New-Object System.Diagnostics.Process
-    $p.StartInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $p.StartInfo.FileName         = $exe
-    # Use ArgumentList (PS 7+) for robust argument passing without manual quoting/escaping
-    foreach ($arg in $argList) { [void]$p.StartInfo.ArgumentList.Add([string]$arg) }
-    $p.StartInfo.UseShellExecute  = $false
-    $p.StartInfo.CreateNoWindow   = $false
-    $workingDir = Split-Path -Path $inputBox.Text -Parent
-    if ([string]::IsNullOrWhiteSpace($workingDir)) {
-        $workingDir = [System.Environment]::CurrentDirectory
-    }
-    $p.StartInfo.WorkingDirectory = $workingDir
-    $p.EnableRaisingEvents        = $true
-
-    # Register Exited event BEFORE starting to ensure we don't miss quick-finishing processes.
-    # Pass summary and UI refs via MessageData so the Action block has reliable access (event scope does not share closure).
-    $eventId = "FasterWhisperExited_$([Guid]::NewGuid().ToString('N'))"
-    $messageData = [pscustomobject]@{
-        Summary           = $summary
-        Form              = $form
-        StartButton        = $startButton
-        CloseButton        = $closeButton
-        PlaySoundCheckbox  = $confirmationSoundCheckbox
-    }
-    $null = Register-ObjectEvent -InputObject $p -EventName Exited -SourceIdentifier $eventId -MessageData $messageData -Action {
-        try {
-            $proc = $Event.Sender
-            $msg = $Event.MessageData
-            if ($null -eq $msg -or $null -eq $msg.Summary) { return }
-            $summary = $msg.Summary
-
-            $summary.EndTime = Get-Date
-            $summary.DurationSeconds = [Math]::Round( ($summary.EndTime - $summary.StartTime).TotalSeconds, 1 )
-            $summary.ExitCode = $proc.ExitCode
-            $summary.Succeeded = ($proc.ExitCode -eq 0)
-            if (-not $summary.Succeeded -and -not $summary.ErrorMessage) {
-                $summary.ErrorMessage = "Transcription failed (exit code $($proc.ExitCode)).`nCheck the console window for details, or try a different model size or device setting."
-            }
-
-            if ($msg.PlaySoundCheckbox.Checked) {
-                [System.Media.SystemSounds]::Asterisk.Play()
-            }
-
-            if ($msg.Form.IsHandleCreated -and -not $msg.Form.IsDisposed) {
-                try {
-                    $msg.Form.Invoke([System.Action]{
-                        $msg.StartButton.Enabled = $true
-                        $msg.CloseButton.Enabled = $true
-
-                        if ($summary.Succeeded) {
-                            $durationText = if ($summary.DurationSeconds -ge 60) {
-                                $mins = [Math]::Floor($summary.DurationSeconds / 60)
-                                $secs = [Math]::Round($summary.DurationSeconds % 60)
-                                "${mins} min ${secs} sec"
-                            } else {
-                                "$($summary.DurationSeconds) seconds"
-                            }
-                            [System.Windows.Forms.MessageBox]::Show(
-                                "Transcription completed successfully!`n`nOutput saved to:`n$($summary.OutputDirectory)`n`nDuration: $durationText",
-                                'Transcription Complete',
-                                [System.Windows.Forms.MessageBoxButtons]::OK,
-                                [System.Windows.Forms.MessageBoxIcon]::Information
-                            ) | Out-Null
-                        } else {
-                            [System.Windows.Forms.MessageBox]::Show(
-                                $summary.ErrorMessage,
-                                'Transcription Failed',
-                                [System.Windows.Forms.MessageBoxButtons]::OK,
-                                [System.Windows.Forms.MessageBoxIcon]::Error
-                            ) | Out-Null
-                        }
-                    }) | Out-Null
-                }
-                catch {
-                    # Form may already be disposed when event fires late.
-                    Write-Verbose "UI update after process exit was skipped: $($_.Exception.Message)"
-                }
-            }
-
-            [void]$script:RunSummaries.Add($summary)
-        }
-        finally {
-            $script:CurrentProcess = $null
-            Unregister-Event -SourceIdentifier $EventSubscriber.SourceIdentifier
-            if ($proc -is [System.IDisposable]) {
-                $proc.Dispose()
-            }
-        }
-    }
-
-    try {
-        $null = $p.Start()
-        $script:CurrentProcess = $p
+        $script:StoppedByUser = $false
+        $script:ActiveRun = $run
+        $script:ExitPollTimer.Start()
         $processLaunched = $true
     }
-    catch {
-        # If start fails, cleanup event and update UI
-        Unregister-Event -SourceIdentifier $eventId
-        $script:CurrentProcess = $null
-
-        $summary.ErrorMessage = "Failed to start the transcription engine.`n`nPlease verify that '$exe' is a valid executable and try again.`n`nDetails: $($_.Exception.Message)"
-        Add-FailedRunSummary -Summary $summary -ErrorMessage $summary.ErrorMessage
-
-        [System.Windows.Forms.MessageBox]::Show(
-            $summary.ErrorMessage,
-            'Error',
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Error
-        ) | Out-Null
-        
-        $startButton.Enabled = $true
-        $closeButton.Enabled = $true
+    finally {
+        # Re-enable buttons if the process was not successfully launched (validation failures, errors)
+        if (-not $processLaunched) {
+            $startButton.Enabled = $true
+            $closeButton.Enabled = $true
+        }
     }
-  }
-  finally {
-    # Re-enable buttons if the process was not successfully launched (validation failures, errors)
-    if (-not $processLaunched) {
-        $startButton.Enabled = $true
-        $closeButton.Enabled = $true
-    }
-  }
 })
 
 # --- Info Tab: TextBox with Scrollbars ---
@@ -948,12 +715,8 @@ $aboutLabel.Location = [Drawing.Point]::new($script:GuiLabelLeft,10)
 $aboutLabel.Text     = 'Based on: https://github.com/Purfview/whisper-standalone-win'
 $tabAbout.Controls.Add($aboutLabel)
 
-$whisperLink = New-Object System.Windows.Forms.LinkLabel
-$whisperLink.Text     = 'https://github.com/openai/whisper'
-$whisperLink.Location = [Drawing.Point]::new($script:GuiLabelLeft,30)
-$whisperLink.AutoSize = $true
-$null = $whisperLink.Links.Add(0, $whisperLink.Text.Length, $whisperLink.Text)
-$whisperLink.add_LinkClicked({
+# Shared LinkClicked handler: only opens http(s) links
+$openLinkHandler = {
     param($linkLabel, $linkClickedEventArgs)
 
     if ($null -eq $linkLabel -or $null -eq $linkClickedEventArgs -or $null -eq $linkClickedEventArgs.Link) { return }
@@ -965,7 +728,14 @@ $whisperLink.add_LinkClicked({
     } else {
         Write-Warning "Blocked non-HTTP link: $url"
     }
-})
+}
+
+$whisperLink = New-Object System.Windows.Forms.LinkLabel
+$whisperLink.Text     = 'https://github.com/openai/whisper'
+$whisperLink.Location = [Drawing.Point]::new($script:GuiLabelLeft,30)
+$whisperLink.AutoSize = $true
+$null = $whisperLink.Links.Add(0, $whisperLink.Text.Length, $whisperLink.Text)
+$whisperLink.add_LinkClicked($openLinkHandler)
 $tabAbout.Controls.Add($whisperLink)
 
 $creatorLink = New-Object System.Windows.Forms.LinkLabel
@@ -973,19 +743,7 @@ $creatorLink.Text     = 'Created by: https://github.com/sebastianspicker'
 $creatorLink.Location = [Drawing.Point]::new($script:GuiLabelLeft,60)
 $creatorLink.AutoSize = $true
 $null = $creatorLink.Links.Add(12, $creatorLink.Text.Length - 12, 'https://github.com/sebastianspicker')
-$creatorLink.add_LinkClicked({
-    param($linkLabel, $linkClickedEventArgs)
-
-    if ($null -eq $linkLabel -or $null -eq $linkClickedEventArgs -or $null -eq $linkClickedEventArgs.Link) { return }
-    $linkData = $linkClickedEventArgs.Link.LinkData
-    if ($null -eq $linkData) { return }
-    $url = $linkData.ToString()
-    if ($url -match '^https?://') {
-        Start-Process -FilePath $url
-    } else {
-        Write-Warning "Blocked non-HTTP link: $url"
-    }
-})
+$creatorLink.add_LinkClicked($openLinkHandler)
 $tabAbout.Controls.Add($creatorLink)
 
 $creditsLabel = New-Object System.Windows.Forms.Label
@@ -1000,13 +758,24 @@ try {
     [void]$form.ShowDialog()
 }
 finally {
+    $script:ExitPollTimer.Dispose()
     $form.Dispose()
 }
 
-# P0: Wait for any still-running process so its summary is added before we output (no lost summary when user closed while running)
-while ($script:CurrentProcess -and -not $script:CurrentProcess.HasExited) {
-    Start-Sleep -Milliseconds 200
+# The form closed while a run was still active (user chose "No = let it finish"): wait for it so its summary is not lost.
+if ($script:ActiveRun) {
+    $run = $script:ActiveRun
+    $script:ActiveRun = $null
+    $p = $run.Process
+    while (-not $p.WaitForExit(200)) { }
+    $exitCode = $p.ExitCode
+    $stoppedByUser = [bool]$script:StoppedByUser
+    $summary = Complete-FasterWhisperRun -Run $run -ExitCode $exitCode -StoppedByUser:$stoppedByUser
+    if ($summary.PlaySound) {
+        [System.Media.SystemSounds]::Asterisk.Play()
+    }
+    [void]$script:RunSummaries.Add($summary)
 }
 
-# Emit all run summaries to pipeline (event-handler output cannot reach main pipeline)
+# Emit all run summaries to pipeline (one per attempted run)
 foreach ($s in $script:RunSummaries) { $s }
