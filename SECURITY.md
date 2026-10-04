@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-This project is **provided as is** and is **no longer actively maintained**. No formal support or security update windows are offered. Vulnerabilities may not be addressed. For a maintained alternative, see **[meetily.ai](https://meetily.ai)** and **[meeting-minutes](https://github.com/Zackriya-Solutions/meeting-minutes)**.
+This project is **provided as is** and is **no longer actively maintained**. No formal support or security update windows are offered. Vulnerabilities may not be addressed. For maintained alternatives, see [Alternatives & Successors](README.md#alternatives--successors).
 
 If you still wish to report a security issue, please follow the process below.
 
