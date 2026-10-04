@@ -227,17 +227,16 @@ When the window closes, the script emits one object per attempted run (including
 
 `ExitCode` is empty when the engine was never started. Fields that validation did not reach (for example `Executable` after an invalid language) stay empty. A run you stop by closing the window and choosing **Yes** has `ErrorMessage` `Transcription stopped by user.`
 
-## Validation (build / run / test)
+## Validation (build / run / lint)
 
-Run from the repository root with PowerShell 7 (tests and lint also run on macOS/Linux; the GUI needs Windows). Requires Pester 5+ and PSScriptAnalyzer.
+Run from the repository root with PowerShell 7 (lint also runs on macOS/Linux; the GUI needs Windows). Linting requires PSScriptAnalyzer.
 
 | Action | Command |
 |--------|---------|
 | **Lint** | `pwsh -NoProfile -Command 'Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1 -EnableExit'` |
-| **Test** | `pwsh -NoProfile -Command 'Invoke-Pester -Path tests -CI'` |
 | **Run GUI** | `.\run_faster_whisper_xxl.ps1` |
 
-There is no separate build step; the script and module are run directly. CI (`.github/workflows/ci.yml`) runs the same lint and test commands on `windows-latest`.
+There is no separate build step; the script and module are run directly. CI (`.github/workflows/ci.yml`) runs the same lint command on `windows-latest`.
 
 ## Repository layout
 
@@ -252,8 +251,6 @@ faster-whisper-standalone-GUI/
 │   │              Initialize-FasterWhisperRun, Invoke-FasterWhisperRun, Complete-FasterWhisperRun
 │   └── Private/   config parsing, defaults, executable resolution and safety checks,
 │                  argument list, output directory, summary finalization
-├── tests/         Pester tests: Settings (catalog, config), Run (request to process and summary),
-│                  PathSafety (security checks), ScriptContract (script vs. module exports)
 ├── PSScriptAnalyzerSettings.psd1     Lint configuration (severity Error, Warning)
 └── .github/       CI workflow and Dependabot
 ```

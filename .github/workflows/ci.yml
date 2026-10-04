@@ -14,24 +14,20 @@ permissions:
 
 jobs:
   powershell-quality:
-    name: ScriptAnalyzer + Pester
+    name: ScriptAnalyzer
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Ensure analysis/test modules
+      - name: Ensure analysis module
         shell: pwsh
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
           if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
             Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -SkipPublisherCheck
-          }
-          # Windows images also ship Pester 3.x, which cannot run these tests.
-          if (-not (Get-Module -ListAvailable -Name Pester | Where-Object Version -ge '5.0.0')) {
-            Install-Module Pester -MinimumVersion 5.0.0 -Scope CurrentUser -Force -SkipPublisherCheck
           }
 
       - name: ScriptAnalyzer
@@ -40,11 +36,3 @@ jobs:
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
           Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1 -EnableExit
-
-      - name: Pester tests
-        shell: pwsh
-        run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
-          Import-Module Pester -MinimumVersion 5.0.0
-          Invoke-Pester -Path tests -CI

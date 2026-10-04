@@ -34,3 +34,37 @@ coverage/
 .pester/
 .cache/
 
+# AI tool and agent state
+.claude/
+.codex/
+.agents/
+.aider*
+.continue/
+.windsurf/
+.serena/
+.codacy/
+.repowise/
+.codegraph/
+.impeccable/
+.mcp.json
+.history/
+
+# Agent instructions
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.cursorrules
+.github/copilot-instructions.md
+
+# Worktree directories
+.worktrees/
+worktrees/
+
+# Tests (kept private)
+tests/
+
+# Work-in-progress and internal docs
+IMPROVEMENT_*.md
+CODE_INSPECTION_FINDINGS.md
+DESIGN_BRIEF.md
+rewritten/
