@@ -21,8 +21,8 @@
     - InputFile: Full path to the selected audio/video file.
     - OutputDirectory: Folder where the tool writes output files.
     - Device: "cpu" or "cuda".
-    - Language: ISO-639-1 language code (empty string if not specified).
-    - Model: Selected model name (e.g., base, medium, large-v2, xxl).
+    - Language: Whisper language code, lowercase (ISO-639-1, plus yue/haw; empty string if not specified).
+    - Model: Selected model name (e.g., base, medium, large-v2, large-v3).
     - OutputFormat: Output file format (txt, srt, vtt).
     - Task: "transcribe" or "translate".
     - BestOf: Integer best_of value.
@@ -83,33 +83,16 @@
 #>
 
 
-# --- Ensure STA mode for WinForms/FileDialogs ---
-if ($host.Runspace.ApartmentState -ne 'STA') {
-    if ($env:OS -ne 'Windows_NT') {
-        throw 'This script requires Windows (WinForms) and an STA runspace.'
-    }
-
-    $psExe = (Get-Process -Id $PID).Path
-
-    if (-not (Test-Path -LiteralPath $psExe)) {
-        Write-Error "Could not locate PowerShell executable for STA relaunch."
-        return
-    }
-
-    if (-not $PSCommandPath) {
-        Write-Error 'Could not determine script path for STA relaunch.'
-        return
-    }
-
-    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$PSCommandPath`"")
-
-    # Relaunch and exit current non-STA process
-    Start-Process -FilePath $psExe -ArgumentList $argList -WindowStyle Normal | Out-Null
-    exit
-}
-
+# --- Requirements: PowerShell 7, Windows, STA for WinForms/FileDialogs (pwsh 7 starts in STA by default) ---
+# No automatic relaunch: a relaunched process would send its run summaries to its own window, not to the caller's pipeline.
 if ($PSVersionTable.PSVersion.Major -lt 7) {
     throw 'PowerShell 7+ (pwsh) is required.'
+}
+if ($env:OS -ne 'Windows_NT') {
+    throw 'This script requires Windows (WinForms).'
+}
+if ($host.Runspace.ApartmentState -ne 'STA') {
+    throw "This script needs an STA session. Run: pwsh -STA -File `"$PSCommandPath`""
 }
 
 # --- Load WinForms assemblies ---
@@ -134,6 +117,8 @@ $script:RunSummaries = [System.Collections.Generic.List[object]]::new()
 $script:ActiveRun = $null
 # Set when the user chose "Stop transcription and close" so the summary records it
 $script:StoppedByUser = $false
+# Set when the user confirmed a custom ExecutablePath; the config is read once, so one Yes covers the session
+$script:ExeConfirmed = $false
 
 # --- Main Form ---
 # Layout constants for Transcription tab (single place to adjust horizontal layout)
@@ -182,7 +167,8 @@ $form.Add_FormClosing({
 
         if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
             try {
-                $script:ActiveRun.Process.Kill()
+                # Whole process tree, so helper processes the engine started stop too
+                $script:ActiveRun.Process.Kill($true)
                 $script:StoppedByUser = $true
             } catch {
                 Write-Warning "Failed to terminate process: $($_.Exception.Message)"
@@ -491,15 +477,13 @@ $useInputAsOutput.Add_CheckedChanged({
 # Poll for process exit on the UI thread (no event runspace, so script-scope state and controls are reachable).
 $script:ExitPollTimer = New-Object System.Windows.Forms.Timer
 $script:ExitPollTimer.Interval = 250
-# Completes the active run after its process exited: finalize summary, record it, optional sound.
+# Completes the active run after its process exited: finalize summary and record it.
+# The completion sound comes from the engine itself (it only gets --beep_off when the box is unchecked).
 function script:Complete-ActiveRun {
     $run = $script:ActiveRun
     $script:ActiveRun = $null
     $summary = Complete-FasterWhisperRun -Run $run -ExitCode $run.Process.ExitCode -StoppedByUser:([bool]$script:StoppedByUser)
     [void]$script:RunSummaries.Add($summary)
-    if ($summary.PlaySound) {
-        [System.Media.SystemSounds]::Asterisk.Play()
-    }
     return $summary
 }
 
@@ -517,10 +501,10 @@ $script:ExitPollTimer.Add_Tick({
     }
 
     if ($summary.Succeeded) {
-        $durationText = if ($summary.DurationSeconds -ge 60) {
-            $mins = [Math]::Floor($summary.DurationSeconds / 60)
-            $secs = [Math]::Round($summary.DurationSeconds % 60)
-            "${mins} min ${secs} sec"
+        # Round the total first, so 119.6 s shows "2 min 0 sec", not "1 min 60 sec"
+        $totalSeconds = [int][Math]::Round($summary.DurationSeconds)
+        $durationText = if ($totalSeconds -ge 60) {
+            "$([Math]::Floor($totalSeconds / 60)) min $($totalSeconds % 60) sec"
         } else {
             "$($summary.DurationSeconds) seconds"
         }
@@ -592,18 +576,22 @@ $startButton.Add_Click({
             -ApplicationDirectory $applicationDirectory `
             -ConfirmExecutable {
                 param($Warning)
-                $warningResult = [System.Windows.Forms.MessageBox]::Show(
-                    $form,
-                    "Security Warning: $Warning`n`nDo you want to continue?",
-                    'Security Warning',
-                    [System.Windows.Forms.MessageBoxButtons]::YesNo,
-                    [System.Windows.Forms.MessageBoxIcon]::Warning
-                )
-                return ($warningResult -eq [System.Windows.Forms.DialogResult]::Yes)
+                # Ask once per session; after a No the next run asks again
+                if (-not $script:ExeConfirmed) {
+                    $warningResult = [System.Windows.Forms.MessageBox]::Show(
+                        $form,
+                        "Security Warning: $Warning`n`nDo you want to continue?",
+                        'Security Warning',
+                        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                        [System.Windows.Forms.MessageBoxIcon]::Warning
+                    )
+                    $script:ExeConfirmed = ($warningResult -eq [System.Windows.Forms.DialogResult]::Yes)
+                }
+                return $script:ExeConfirmed
             }
 
-        # Show the normalized (lowercase) language code when the module accepted a 2-letter code
-        if ($run.Language -and $run.Language -cne $languageBox.Text -and $run.Language -match '^[a-z]{2}$') {
+        # Show the normalized (trimmed, lowercase) code the module passes on; the module owns the language rule
+        if ($run.Language -and $run.Language -cne $languageBox.Text) {
             $languageBox.Text = $run.Language
         }
 
@@ -657,7 +645,8 @@ Processing Device:
      a compatible NVIDIA GPU with CUDA drivers installed.
 
 Language (e.g. en, de, fr):
-   Enter the 2-letter code for the spoken language in your file.
+   Enter the 2-letter code for the spoken language in your file
+   ('yue' for Cantonese and 'haw' for Hawaiian have 3 letters).
    Examples: 'en' = English, 'de' = German, 'fr' = French, 'es' = Spanish.
    Leave empty to let the tool detect the language automatically.
 
@@ -666,7 +655,7 @@ Model Size:
    - 'base': Fastest, least accurate. Good for quick drafts.
    - 'medium': Balanced accuracy and speed. Recommended for most uses.
    - 'large-v2': High accuracy, slower processing.
-   - 'xxl': Best accuracy, requires the most time and memory.
+   - 'large-v3': Best accuracy, requires the most time and memory.
 
 Output Directory:
    Where the result file will be saved. You can choose any folder,
@@ -707,7 +696,7 @@ TIPS
 ----
 - Start with the 'medium' model for a good balance of speed and accuracy.
 - Use 'cuda' if you have an NVIDIA GPU -- it can be 5-10x faster.
-- For long recordings, larger models (large-v2, xxl) give better results.
+- For long recordings, larger models (large-v2, large-v3) give better results.
 - Your files stay on your computer. Nothing is sent to the internet.
 
 HELP

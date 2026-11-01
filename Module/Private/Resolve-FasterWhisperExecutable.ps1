@@ -6,7 +6,7 @@
     A bare name is looked up in ApplicationDirectory first (also as <name>.exe when it has no
     extension, matching how PATH lookup applies PATHEXT), then on PATH (applications only).
     A value containing a path separator must be an existing file (relative values are resolved
-    against the current PowerShell location) and is returned as a full path.
+    against ApplicationDirectory, like bare names) and is returned as a full path.
 #>
 function Resolve-FasterWhisperExecutable {
     [CmdletBinding()]
@@ -21,6 +21,10 @@ function Resolve-FasterWhisperExecutable {
     )
 
     if ($Executable -match '[/\\]') {
+        # Relative paths are relative to the application folder, like bare names
+        if (-not [System.IO.Path]::IsPathRooted($Executable) -and -not [string]::IsNullOrWhiteSpace($ApplicationDirectory)) {
+            $Executable = Join-Path -Path $ApplicationDirectory -ChildPath $Executable
+        }
         if (Test-Path -LiteralPath $Executable -PathType Leaf) {
             return (Convert-Path -LiteralPath $Executable)
         }

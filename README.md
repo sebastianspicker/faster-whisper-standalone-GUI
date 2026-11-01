@@ -56,8 +56,8 @@ High-level flow from script start to pipeline output:
 ```mermaid
 flowchart LR
   ScriptStart[Script start]
-  STACheck[STA check]
-  Relaunch[Relaunch in STA if needed]
+  STACheck[Check PowerShell 7, Windows, STA]
+  StopError[Stop with a message: start with pwsh -STA]
   LoadModule[Load module]
   LoadConfig[Load config JSON or defaults]
   BuildForm[Build form and prefill UI]
@@ -76,9 +76,8 @@ flowchart LR
   WaitProcess[Wait for a still-running process and complete its summary]
   EmitPipeline[Emit all RunSummaries to pipeline]
   ScriptStart --> STACheck
-  STACheck -->|not STA| Relaunch
-  STACheck -->|STA| LoadModule
-  Relaunch -->|new process| ScriptStart
+  STACheck -->|not met| StopError
+  STACheck -->|ok| LoadModule
   LoadModule --> LoadConfig
   LoadConfig --> BuildForm
   BuildForm --> ShowForm
@@ -99,7 +98,7 @@ flowchart LR
   WaitProcess --> EmitPipeline
 ```
 
-The script enforces STA execution, builds the WinForms UI, and validates every run before process launch. Validation failures do not start the executable and are converted into failed run summaries so automation still has a complete log. Started runs are polled for exit by a UI-thread timer, which completes the summary and unlocks the UI. All summaries are emitted to the pipeline when the window closes.
+The script checks for PowerShell 7, Windows and an STA session, builds the WinForms UI, and validates every run before process launch. Validation failures do not start the executable and are converted into failed run summaries so automation still has a complete log. Started runs are polled for exit by a UI-thread timer, which completes the summary and unlocks the UI. All summaries are emitted to the pipeline when the window closes.
 
 ## Lifecycle
 
@@ -109,7 +108,7 @@ From **Start** click to pipeline emission for a single run:
 flowchart TB
   StartClick[Start clicked]
   CreateSummary[Create summary object from UI]
-  Validation[Validation: language, exe path and security, exe resolution, input file, path traversal, output dir]
+  Validation[Validation: language, custom-path confirmation, exe resolution and .exe check, input file, output dir]
   ValidationFail[Validation failed]
   MsgBox[Message box and failed summary]
   Return[Return to form]
@@ -118,7 +117,7 @@ flowchart TB
   CreateProcess[Start process via resolved executable path]
   StartProc[Start exit-poll timer]
   ProcRunning[Process running]
-  OnExit["Timer tick: complete summary, optional sound, unlock UI, add to RunSummaries, show result"]
+  OnExit["Timer tick: complete summary, unlock UI, add to RunSummaries, show result"]
   FormClosed[Form closed]
   WaitForProc[Wait for the active run if still running]
   EmitToPipeline[Emit each RunSummaries item to pipeline]
@@ -145,12 +144,12 @@ Each run starts from UI input, creates a summary object, and passes through a st
 - WinForms GUI for selecting:
   - Audio/video file (MP3, WAV, MP4) and output directory
   - Processing device: `cpu` or `cuda` (NVIDIA GPU)
-  - Language (2-letter code, or leave empty for auto-detection)
-  - Model size: `base`, `medium`, `large-v2`, `xxl`
+  - Language (2-letter code, `yue` or `haw`, or leave empty for auto-detection)
+  - Model size: `base`, `medium` (default), `large-v2`, `large-v3`
   - Output format: `txt` (plain text), `srt` (subtitles), `vtt` (web subtitles)
   - Task: `transcribe` or `translate` (to English)
   - Advanced decoding parameters (`best_of`, `beam_size`, `patience`, `temperature`)
-  - Completion notification sound
+  - Completion notification sound (the engine's own beep)
   - Console progress display
 - Automation-friendly output: one structured `PSCustomObject` per run
 - JSON configuration for default GUI values (optional)
@@ -160,7 +159,7 @@ Each run starts from UI input, creates a summary object, and passes through a st
 - Windows (WinForms GUI; not supported on macOS/Linux)
 - PowerShell 7+ (`pwsh`)
 - Faster Whisper standalone executable available (looked up in this order):
-  - configured via JSON (`ExecutablePath`; a path with a folder asks for confirmation before use), or
+  - configured via JSON (`ExecutablePath`; a relative path is resolved against the script folder, and a path with a folder asks for confirmation once per session), or
   - in the same folder as the script, or
   - in `PATH`
 
@@ -174,14 +173,14 @@ See [Quick Start for Windows Users](#quick-start-for-windows-users) above for a 
 .\run_faster_whisper_xxl.ps1
 ```
 
-If started from a non-STA session, the script relaunches itself in STA mode automatically.
+PowerShell 7 starts in STA mode by default. If the session is not STA (for example `pwsh -MTA`), the script stops with a message; start it with `pwsh -STA -File .\run_faster_whisper_xxl.ps1`.
 Select an input file, configure options, click **Start Transcription**, and the result is saved to your chosen output folder. A structured run summary object is emitted to the pipeline for automation.
 
 ## Configuration (optional JSON)
 
 Create `run_faster_whisper_xxl.config.json` next to `run_faster_whisper_xxl.ps1` (copy from `run_faster_whisper_xxl.config.json.example`).
 
-Supported keys (all optional; invalid values fall back to defaults, `BestOf`/`BeamSize` are limited to 1-10 and `Patience`/`Temperature` to 0.0-2.0):
+Supported keys (all optional; invalid values fall back to defaults, `BestOf`/`BeamSize` are limited to 1-10, `Patience` to 0.1-2.0 and `Temperature` to 0.0-2.0):
 
 - `ExecutablePath` (string)
 - `Device` (`cpu` or `cuda`)
@@ -240,7 +239,7 @@ When the window closes, the script emits one object per attempted run (including
 - `PlaySound`, `ShowCliProgress`
 - `Executable`, `StartTime`, `EndTime`, `DurationSeconds`, `ExitCode`, `Succeeded`, `ErrorMessage`
 
-`ExitCode` is empty when the engine was never started. Fields that validation did not reach (for example `Executable` after an invalid language) stay empty. A run you stop by closing the window and choosing **Yes** has `ErrorMessage` `Transcription stopped by user.`
+`ExitCode` is empty when the engine was never started. Fields that validation did not reach (for example `Executable` after an invalid language) stay empty. A valid `Language` is recorded in lowercase, and once the input file is found, `InputFile` and `OutputDirectory` are full paths. A run you stop by closing the window and choosing **Yes** has `ErrorMessage` `Transcription stopped by user.`
 
 ## Validation (build / run / lint)
 
@@ -257,15 +256,15 @@ There is no separate build step; the script and module are run directly. CI (`.g
 
 ```
 faster-whisper-standalone-GUI/
-├── run_faster_whisper_xxl.ps1        Entry point: STA bootstrap, WinForms window, run polling, pipeline output
+├── run_faster_whisper_xxl.ps1        Entry point: startup checks, WinForms window, run polling, pipeline output
 ├── run_faster_whisper_xxl.config.json.example
 ├── Module/                           FasterWhisperStandaloneGui module: all non-UI logic, loads on any OS
 │   ├── FasterWhisperStandaloneGui.psd1   Manifest; FunctionsToExport is the only export list
 │   ├── FasterWhisperStandaloneGui.psm1   Dot-sources Private/ then Public/
 │   ├── Public/    Get-FasterWhisperOptionCatalog, Get-FasterWhisperGuiConfig,
 │   │              Initialize-FasterWhisperRun, Invoke-FasterWhisperRun, Complete-FasterWhisperRun
-│   └── Private/   config parsing, defaults, executable resolution and safety checks,
-│                  argument list, output directory, summary finalization
+│   └── Private/   config parsing, defaults, executable resolution, argument list,
+│                  summary finalization
 ├── PSScriptAnalyzerSettings.psd1     Lint configuration (severity Error, Warning)
 └── .github/       CI workflow and Dependabot
 ```
@@ -285,7 +284,7 @@ For archive notice and maintained alternative, see [ARCHIVE.md](ARCHIVE.md).
 - **No output files created**: Make sure the input file exists and the output folder is writable. Try selecting a different output directory.
 - **CUDA errors or GPU problems**: Switch the Processing Device to `cpu` to verify the tool works, then check that your NVIDIA GPU drivers and CUDA toolkit are correctly installed.
 - **No progress shown during transcription**: Check the “Show progress in console window” option before starting.
-- **Script does not start**: Make sure you are using PowerShell 7+ (`pwsh`), not Windows PowerShell 5.1. You can check your version by running `$PSVersionTable.PSVersion` in PowerShell.
+- **Script does not start**: Make sure you are using PowerShell 7+ (`pwsh`), not Windows PowerShell 5.1. You can check your version by running `$PSVersionTable.PSVersion` in PowerShell. If it stops with "This script needs an STA session", start it with `pwsh -STA -File .\run_faster_whisper_xxl.ps1`.
 
 ## Alternatives & Successors
 
