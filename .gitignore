@@ -68,3 +68,15 @@ IMPROVEMENT_*.md
 CODE_INSPECTION_FINDINGS.md
 DESIGN_BRIEF.md
 rewritten/
+
+# Local planning records and assistant scratch are never public deliverables.
+/*_LEDGER.md
+/*_ledger.md
+/ALPHA_AUDIT*.md
+/ALPHA_IMPLEMENTATION_LEDGER.md
+/ALPHA_PR_DESCRIPTION.md
+/.ai/
+/scratchpad/
+
+# Local Codex guidance.
+/CODEX.md

@@ -1,10 +1,25 @@
-> **Notice:** This repository is provided **as is** and is **no longer actively maintained**.
->
-> **Better alternatives:** [Buzz](https://github.com/chidiwilliams/buzz) (cross-platform), [Vibe](https://github.com/thewh1teagle/vibe) (cross-platform, whisper.cpp) and [MacWhisper](https://goodsnooze.gumroad.com/l/macwhisper) (macOS) are maintained, more capable, and easier to install than this Windows-only PowerShell wrapper. See [Alternatives & Successors](#alternatives--successors).
-
 # Faster Whisper Standalone GUI (PowerShell)
 
+
+> **Better alternatives:** [Buzz](https://github.com/chidiwilliams/buzz) (cross-platform), [Vibe](https://github.com/thewh1teagle/vibe) (cross-platform, whisper.cpp) and [MacWhisper](https://goodsnooze.gumroad.com/l/macwhisper) (macOS) are maintained, more capable, and easier to install than this Windows-only PowerShell wrapper. See [Alternatives & Successors](#alternatives--successors).
+
 A Windows application that converts speech in audio and video files into text. It provides a simple graphical interface -- no command-line knowledge needed for basic use.
+
+<details>
+<summary>Status and limitations</summary>
+
+**Project status: archived independent project.** I developed this Windows PowerShell
+transcription wrapper independently alongside my main professional work. It is no
+longer actively maintained and remains available as a reference implementation or
+starting point for adaptation, rather than a ready-to-use, supported transcription
+product. Review the external executable and test compatibility with your setup before
+reuse.
+
+**Disclaimer.** Automated transcripts and translations can contain errors. Verify
+important wording against the original recording; you are responsible for deciding
+whether the output is suitable for your purpose.
+
+</details>
 
 **What it does:** Select an audio or video file (MP3, WAV, MP4), pick your settings, click "Start Transcription", and get a text transcript, subtitle file, or English translation.
 
