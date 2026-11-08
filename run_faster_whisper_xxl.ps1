@@ -8,9 +8,6 @@
     The script writes one summary object per attempted run (finished or failed validation) to the pipeline when the window closes; it can be piped to Export-Csv, ConvertTo-Json, Where-Object, etc.
     All human-friendly interaction (dialogs, message boxes) is handled via the GUI; the pipeline output remains machine-friendly.
 
-.PARAMETER None
-    This script does not accept command-line parameters. Configuration is done via the GUI and (optionally) a JSON configuration file.
-
 .INPUTS
     None. You cannot pipe input into this script.
 
@@ -39,21 +36,6 @@
     - Succeeded: Boolean indicating success (ExitCode = 0).
     - ErrorMessage: Error text if validation failed or ExitCode was non-zero; otherwise null.
 
-.DESCRIPTION (CONFIGURATION)
-    The script supports optional JSON-based configuration.
-    The JSON file is run_faster_whisper_xxl.config.json, located next to the script.
-    If the file is missing, empty, unreadable, or contains invalid JSON, the script silently falls back to built-in defaults.
-    Supported JSON keys (all optional) match the GUI settings and are used only to pre-populate the GUI:
-    ExecutablePath, Device, Language, Model, OutputFormat, Task, BestOf, BeamSize, Patience, Temperature,
-    PlayConfirmationSound, ShowCliProgress, UseInputDirectoryAsOutput.
-
-.DESCRIPTION (WORKFLOW)
-    1) Start the script to open the GUI.
-    2) Select an input audio/video file.
-    3) Choose device/model/language/task/output options and adjust decoding parameters.
-    4) Click Start to launch the external process.
-    5) Wait until completion; the GUI unlocks and a run summary object is emitted to the pipeline.
-
 .EXAMPLE
     PS> .\run_faster_whisper_xxl.ps1
 
@@ -80,6 +62,21 @@
     - Output directory handling: if "Use input directory as output" is enabled, the output directory is derived from the input file location and the output directory controls are disabled.
     - Numeric parameters are formatted culture-invariant when passed to the executable to ensure a dot decimal separator.
     - The pipeline output is intentionally kept free of decorative strings to support clean automation and logging.
+
+    Configuration:
+    The script supports optional JSON-based configuration.
+    The JSON file is run_faster_whisper_xxl.config.json, located next to the script.
+    If the file is missing, empty, unreadable, or contains invalid JSON, the script silently falls back to built-in defaults.
+    Supported JSON keys (all optional) match the GUI settings and are used only to pre-populate the GUI:
+    ExecutablePath, Device, Language, Model, OutputFormat, Task, BestOf, BeamSize, Patience, Temperature,
+    PlayConfirmationSound, ShowCliProgress, UseInputDirectoryAsOutput.
+
+    Workflow:
+    1) Start the script to open the GUI.
+    2) Select an input audio/video file.
+    3) Choose device/model/language/task/output options and adjust decoding parameters.
+    4) Click Start to launch the external process.
+    5) Wait until completion; the GUI unlocks and a run summary object is emitted to the pipeline.
 #>
 
 
@@ -99,7 +96,8 @@ if ($host.Runspace.ApartmentState -ne 'STA') {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
-[System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
+# Throws once a window exists in this process (a second start in the same session); the setting then already holds
+try { [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false) } catch [System.InvalidOperationException] { $null = $_ }
 
 # --- Load configuration helpers ---
 $moduleManifestPath = Join-Path -Path $PSScriptRoot -ChildPath 'Module/FasterWhisperStandaloneGui.psd1'
@@ -353,7 +351,6 @@ function script:Add-SliderRow {
     $slider.Size     = [Drawing.Size]::new($script:GuiSliderWidth,$script:GuiSliderHeight)
     $slider.Minimum  = $Minimum
     $slider.Maximum  = $Maximum
-    if ($Tenths) { $slider.TickFrequency = 1 }
     $slider.Value    = $Value
     $Parent.Controls.Add($slider)
 
