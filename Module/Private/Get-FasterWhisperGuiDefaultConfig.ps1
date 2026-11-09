@@ -6,7 +6,7 @@ function Get-FasterWhisperGuiDefaultConfig {
         ExecutablePath = 'faster-whisper-xxl.exe'
         Device = 'cpu'
         Language = ''
-        Model = 'base'
+        Model = 'medium'
         OutputFormat = 'txt'
         Task = 'transcribe'
         BestOf = 3

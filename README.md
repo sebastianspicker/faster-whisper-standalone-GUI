@@ -1,10 +1,27 @@
-> **Notice:** This repository is provided **as is** and is **no longer actively maintained**.
->
-> **Better alternatives:** [Buzz](https://github.com/chidiwilliams/buzz) (cross-platform), [Vibe](https://github.com/thewh1teagle/vibe) (cross-platform, whisper.cpp) and [MacWhisper](https://goodsnooze.gumroad.com/l/macwhisper) (macOS) are maintained, more capable, and easier to install than this Windows-only PowerShell wrapper. See [Alternatives & Successors](#alternatives--successors).
-
 # Faster Whisper Standalone GUI (PowerShell)
 
+
+> **Better alternatives:** [Buzz](https://github.com/chidiwilliams/buzz) (cross-platform), [Vibe](https://github.com/thewh1teagle/vibe) (cross-platform, whisper.cpp) and [MacWhisper](https://goodsnooze.gumroad.com/l/macwhisper) (macOS) are maintained, more capable, and easier to install than this Windows-only PowerShell wrapper. See [Alternatives & Successors](#alternatives--successors).
+
 A Windows application that converts speech in audio and video files into text. It provides a simple graphical interface -- no command-line knowledge needed for basic use.
+
+> _Claude was used to polish and proof-read the code and documentation of this repository._
+
+<details>
+<summary>Status and limitations</summary>
+
+**Project status: archived independent project.** I developed this Windows PowerShell
+transcription wrapper independently alongside my main professional work. It is no
+longer actively maintained and remains available as a reference implementation or
+starting point for adaptation, rather than a ready-to-use, supported transcription
+product. Review the external executable and test compatibility with your setup before
+reuse.
+
+**Disclaimer.** Automated transcripts and translations can contain errors. Verify
+important wording against the original recording; you are responsible for deciding
+whether the output is suitable for your purpose.
+
+</details>
 
 **What it does:** Select an audio or video file (MP3, WAV, MP4), pick your settings, click "Start Transcription", and get a text transcript, subtitle file, or English translation.
 
@@ -36,106 +53,90 @@ The GUI is intended for interactive use, while the pipeline output is intended f
 
 ## How it works
 
-High-level flow from script start to pipeline output:
+Three parts run on your machine: the WinForms script, the PowerShell module it imports, and the external engine `faster-whisper-xxl.exe`, started as a child process.
 
 ```mermaid
 flowchart LR
-  ScriptStart[Script start]
-  STACheck[STA check]
-  Relaunch[Relaunch in STA if needed]
-  LoadModule[Load module]
-  LoadConfig[Load config JSON or defaults]
-  BuildForm[Build form and prefill UI]
-  ShowForm[Show modal form]
-  UserAction[User selects file and options]
-  StartClick[User clicks Start]
-  BuildSummary[Build summary object]
-  Validation[Run validation chain]
-  ShowError[Message box and failed summary]
-  StartProcess[Start external process]
-  RegisterExited[Lock UI and start exit-poll timer]
-  ProcessRun[Process runs]
-  ExitedHandler[Timer sees exit, completes summary and adds to RunSummaries]
-  UnlockUI[Unlock UI and show result]
-  FormClose[User closes form]
-  WaitProcess[Wait for a still-running process and complete its summary]
-  EmitPipeline[Emit all RunSummaries to pipeline]
-  ScriptStart --> STACheck
-  STACheck -->|not STA| Relaunch
-  STACheck -->|STA| LoadModule
-  Relaunch -->|new process| ScriptStart
-  LoadModule --> LoadConfig
-  LoadConfig --> BuildForm
-  BuildForm --> ShowForm
-  ShowForm --> UserAction
-  UserAction --> StartClick
-  StartClick --> BuildSummary
-  BuildSummary --> Validation
-  Validation -->|fail| ShowError
-  ShowError --> StartClick
-  Validation -->|pass| StartProcess
-  StartProcess --> RegisterExited
-  RegisterExited --> ProcessRun
-  ProcessRun --> ExitedHandler
-  ExitedHandler --> UnlockUI
-  UnlockUI --> StartClick
-  UserAction --> FormClose
-  FormClose --> WaitProcess
-  WaitProcess --> EmitPipeline
+  user((User))
+  subgraph pwsh [pwsh STA session]
+    script[run_faster_whisper_xxl.ps1]
+    module[FasterWhisperStandaloneGui]
+  end
+  config[("config.json<br/>(optional)")]
+  engine[faster-whisper-xxl.exe]
+  files[("txt / srt / vtt")]
+  pipeline[[PowerShell pipeline]]
+  user -->|clicks, picks file| script
+  script -->|calls public functions| module
+  module -->|reads defaults| config
+  module -->|"ProcessStartInfo + args"| engine
+  engine -->|writes| files
+  script -.->|"polls HasExited every 250 ms"| engine
+  script -->|"run summaries on close"| pipeline
+  classDef focus fill:#fde68a,stroke:#b45309,color:#1f2937
+  class module focus
 ```
 
-The script enforces STA execution, builds the WinForms UI, and validates every run before process launch. Validation failures do not start the executable and are converted into failed run summaries so automation still has a complete log. Started runs are polled for exit by a UI-thread timer, which completes the summary and unlocks the UI. All summaries are emitted to the pipeline when the window closes.
+The script owns everything visible: the form, dialogs, the exit-poll timer and the list of run summaries. The module holds all logic that does not need WinForms (config parsing, validation, executable lookup, argument building, summary finalization), so it also loads on macOS and Linux. The engine is the only part that touches the audio; it writes its output files itself, and this repository never reads them. Nothing goes over the network.
 
-## Lifecycle
+Where in the code:
 
-From **Start** click to pipeline emission for a single run:
+- [run_faster_whisper_xxl.ps1](run_faster_whisper_xxl.ps1): startup checks, form, `Start` click handler, `ExitPollTimer`, `FormClosing` handler, pipeline output
+- [Get-FasterWhisperGuiConfig.ps1](Module/Public/Get-FasterWhisperGuiConfig.ps1): loads `run_faster_whisper_xxl.config.json`, falls back to [defaults](Module/Private/Get-FasterWhisperGuiDefaultConfig.ps1), clamps to the [option catalog](Module/Public/Get-FasterWhisperOptionCatalog.ps1)
+
+### What happens when you click Start Transcription
 
 ```mermaid
-flowchart TB
-  StartClick[Start clicked]
-  CreateSummary[Create summary object from UI]
-  Validation[Validation: language, exe path and security, exe resolution, input file, path traversal, output dir]
-  ValidationFail[Validation failed]
-  MsgBox[Message box and failed summary]
-  Return[Return to form]
-  BuildArgs[Build argument list]
-  LockUI[Lock Start and Close buttons]
-  CreateProcess[Start process via resolved executable path]
-  StartProc[Start exit-poll timer]
-  ProcRunning[Process running]
-  OnExit["Timer tick: complete summary, optional sound, unlock UI, add to RunSummaries, show result"]
-  FormClosed[Form closed]
-  WaitForProc[Wait for the active run if still running]
-  EmitToPipeline[Emit each RunSummaries item to pipeline]
-  StartClick --> LockUI
-  LockUI --> CreateSummary
-  CreateSummary --> Validation
-  Validation -->|fail| ValidationFail
-  ValidationFail --> MsgBox
-  MsgBox --> Return
-  Validation -->|pass| BuildArgs
-  BuildArgs --> CreateProcess
-  CreateProcess --> StartProc
-  StartProc --> ProcRunning
-  ProcRunning --> OnExit
-  OnExit --> FormClosed
-  FormClosed --> WaitForProc
-  WaitForProc --> EmitToPipeline
+sequenceDiagram
+  autonumber
+  actor U as User
+  participant gui as run_faster_whisper_xxl.ps1
+  participant mod as Module
+  participant exe as faster-whisper-xxl.exe
+  U->>gui: Click "Start Transcription"
+  gui->>gui: Disable Start and Close
+  gui->>mod: Initialize-FasterWhisperRun
+  mod->>mod: Check language, confirm custom path,<br/>resolve .exe, input file, output dir
+  alt validation fails
+    mod-->>gui: run with Failure
+    gui-->>U: Message box, record failed summary
+  else validation passes
+    mod-->>gui: run with StartInfo
+    gui->>mod: Invoke-FasterWhisperRun
+    mod-)exe: Process.Start()
+    loop every 250 ms
+      gui->>exe: HasExited?
+    end
+    gui->>mod: Complete-FasterWhisperRun
+    mod-->>gui: finished summary
+    gui-->>U: Enable buttons, show result
+  end
 ```
 
-Each run starts from UI input, creates a summary object, and passes through a strict validation chain. Failed validation branches return to the form immediately with a user-visible error and a recorded failure object. Successful runs launch the process and are completed when it exits; if the window is closed first, the script waits for the process (or stops it, if you choose so) before emitting all summary records.
+Steps 3–4 never start anything: every check runs before the engine is launched, and a failed check still produces a summary (with an empty `ExitCode`), so a CSV log shows rejected runs too. Step 4 asks the user only when `ExecutablePath` contains a folder, and only once per session. The executable is looked up in the script folder first, then on `PATH`, and anything that is not a `.exe` is rejected. Step 10 polls from a UI-thread timer rather than a `Process.Exited` event, so the handler can touch the form and script variables directly.
+
+If you close the window while the engine is running, the script asks: **Yes** kills the process tree, **No** lets it finish, **Cancel** returns to the form. In both of the first two cases the script waits for the process after the window closes, completes its summary, and then writes every summary of the session to the pipeline (see [Run summary output](#run-summary-output)).
+
+Where in the code:
+
+- [Initialize-FasterWhisperRun.ps1](Module/Public/Initialize-FasterWhisperRun.ps1): validation chain and `ProcessStartInfo` (steps 3–7)
+- [Resolve-FasterWhisperExecutable.ps1](Module/Private/Resolve-FasterWhisperExecutable.ps1): script folder, then `PATH`
+- [Get-FasterWhisperArgumentList.ps1](Module/Private/Get-FasterWhisperArgumentList.ps1): engine command line (`--model`, `--output_dir`, `--beep_off`, …)
+- [Invoke-FasterWhisperRun.ps1](Module/Public/Invoke-FasterWhisperRun.ps1): starts the process (steps 8–9)
+- [Complete-FasterWhisperRun.ps1](Module/Public/Complete-FasterWhisperRun.ps1) and [Close-FasterWhisperRunSummary.ps1](Module/Private/Close-FasterWhisperRunSummary.ps1): end time, duration, exit code, `Succeeded` (steps 11–12)
+- [Close-FasterWhisperRunWithFailure.ps1](Module/Private/Close-FasterWhisperRunWithFailure.ps1): failed summary for steps 5–6
 
 ## Features
 
 - WinForms GUI for selecting:
   - Audio/video file (MP3, WAV, MP4) and output directory
   - Processing device: `cpu` or `cuda` (NVIDIA GPU)
-  - Language (2-letter code, or leave empty for auto-detection)
-  - Model size: `base`, `medium`, `large-v2`, `xxl`
+  - Language (2-letter code, `yue` or `haw`, or leave empty for auto-detection)
+  - Model size: `base`, `medium` (default), `large-v2`, `large-v3`
   - Output format: `txt` (plain text), `srt` (subtitles), `vtt` (web subtitles)
   - Task: `transcribe` or `translate` (to English)
   - Advanced decoding parameters (`best_of`, `beam_size`, `patience`, `temperature`)
-  - Completion notification sound
+  - Completion notification sound (the engine's own beep)
   - Console progress display
 - Automation-friendly output: one structured `PSCustomObject` per run
 - JSON configuration for default GUI values (optional)
@@ -145,7 +146,7 @@ Each run starts from UI input, creates a summary object, and passes through a st
 - Windows (WinForms GUI; not supported on macOS/Linux)
 - PowerShell 7+ (`pwsh`)
 - Faster Whisper standalone executable available (looked up in this order):
-  - configured via JSON (`ExecutablePath`; a path with a folder asks for confirmation before use), or
+  - configured via JSON (`ExecutablePath`; a relative path is resolved against the script folder, and a path with a folder asks for confirmation once per session), or
   - in the same folder as the script, or
   - in `PATH`
 
@@ -159,14 +160,14 @@ See [Quick Start for Windows Users](#quick-start-for-windows-users) above for a 
 .\run_faster_whisper_xxl.ps1
 ```
 
-If started from a non-STA session, the script relaunches itself in STA mode automatically.
+PowerShell 7 starts in STA mode by default. If the session is not STA (for example `pwsh -MTA`), the script stops with a message; start it with `pwsh -STA -File .\run_faster_whisper_xxl.ps1`.
 Select an input file, configure options, click **Start Transcription**, and the result is saved to your chosen output folder. A structured run summary object is emitted to the pipeline for automation.
 
 ## Configuration (optional JSON)
 
 Create `run_faster_whisper_xxl.config.json` next to `run_faster_whisper_xxl.ps1` (copy from `run_faster_whisper_xxl.config.json.example`).
 
-Supported keys (all optional; invalid values fall back to defaults, `BestOf`/`BeamSize` are limited to 1-10 and `Patience`/`Temperature` to 0.0-2.0):
+Supported keys (all optional; invalid values fall back to defaults, `BestOf`/`BeamSize` are limited to 1-10, `Patience` to 0.1-2.0 and `Temperature` to 0.0-2.0):
 
 - `ExecutablePath` (string)
 - `Device` (`cpu` or `cuda`)
@@ -225,7 +226,7 @@ When the window closes, the script emits one object per attempted run (including
 - `PlaySound`, `ShowCliProgress`
 - `Executable`, `StartTime`, `EndTime`, `DurationSeconds`, `ExitCode`, `Succeeded`, `ErrorMessage`
 
-`ExitCode` is empty when the engine was never started. Fields that validation did not reach (for example `Executable` after an invalid language) stay empty. A run you stop by closing the window and choosing **Yes** has `ErrorMessage` `Transcription stopped by user.`
+`ExitCode` is empty when the engine was never started. Fields that validation did not reach (for example `Executable` after an invalid language) stay empty. A valid `Language` is recorded in lowercase, and once the input file is found, `InputFile` and `OutputDirectory` are full paths. A run you stop by closing the window and choosing **Yes** has `ErrorMessage` `Transcription stopped by user.`
 
 ## Validation (build / run / lint)
 
@@ -242,15 +243,15 @@ There is no separate build step; the script and module are run directly. CI (`.g
 
 ```
 faster-whisper-standalone-GUI/
-├── run_faster_whisper_xxl.ps1        Entry point: STA bootstrap, WinForms window, run polling, pipeline output
+├── run_faster_whisper_xxl.ps1        Entry point: startup checks, WinForms window, run polling, pipeline output
 ├── run_faster_whisper_xxl.config.json.example
 ├── Module/                           FasterWhisperStandaloneGui module: all non-UI logic, loads on any OS
 │   ├── FasterWhisperStandaloneGui.psd1   Manifest; FunctionsToExport is the only export list
 │   ├── FasterWhisperStandaloneGui.psm1   Dot-sources Private/ then Public/
 │   ├── Public/    Get-FasterWhisperOptionCatalog, Get-FasterWhisperGuiConfig,
 │   │              Initialize-FasterWhisperRun, Invoke-FasterWhisperRun, Complete-FasterWhisperRun
-│   └── Private/   config parsing, defaults, executable resolution and safety checks,
-│                  argument list, output directory, summary finalization
+│   └── Private/   config parsing, defaults, executable resolution, argument list,
+│                  summary finalization
 ├── PSScriptAnalyzerSettings.psd1     Lint configuration (severity Error, Warning)
 └── .github/       CI workflow and Dependabot
 ```
@@ -270,7 +271,7 @@ For archive notice and maintained alternative, see [ARCHIVE.md](ARCHIVE.md).
 - **No output files created**: Make sure the input file exists and the output folder is writable. Try selecting a different output directory.
 - **CUDA errors or GPU problems**: Switch the Processing Device to `cpu` to verify the tool works, then check that your NVIDIA GPU drivers and CUDA toolkit are correctly installed.
 - **No progress shown during transcription**: Check the “Show progress in console window” option before starting.
-- **Script does not start**: Make sure you are using PowerShell 7+ (`pwsh`), not Windows PowerShell 5.1. You can check your version by running `$PSVersionTable.PSVersion` in PowerShell.
+- **Script does not start**: Make sure you are using PowerShell 7+ (`pwsh`), not Windows PowerShell 5.1. You can check your version by running `$PSVersionTable.PSVersion` in PowerShell. If it stops with "This script needs an STA session", start it with `pwsh -STA -File .\run_faster_whisper_xxl.ps1`.
 
 ## Alternatives & Successors
 

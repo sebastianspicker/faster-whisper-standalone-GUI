@@ -11,11 +11,12 @@
     System.Collections.Hashtable
     A hashtable with the following keys:
     - Devices: Array of allowed device values ('cpu', 'cuda')
-    - Models: Array of allowed model values ('base', 'medium', 'large-v2', 'xxl')
+    - Models: Array of allowed model values ('base', 'medium', 'large-v2', 'large-v3')
     - Formats: Array of allowed output format values ('txt', 'srt', 'vtt')
     - Tasks: Array of allowed task values ('transcribe', 'translate')
     - BestOf, BeamSize: Hashtable with Minimum and Maximum (1 to 10)
-    - Patience, Temperature: Hashtable with Minimum and Maximum (0.0 to 2.0)
+    - Patience: Hashtable with Minimum and Maximum (0.1 to 2.0)
+    - Temperature: Hashtable with Minimum and Maximum (0.0 to 2.0)
 
 .EXAMPLE
     $catalog = Get-FasterWhisperOptionCatalog
@@ -29,12 +30,13 @@ function Get-FasterWhisperOptionCatalog {
 
     return @{
         Devices     = @('cpu', 'cuda')
-        Models      = @('base', 'medium', 'large-v2', 'xxl')
+        Models      = @('base', 'medium', 'large-v2', 'large-v3')
         Formats     = @('txt', 'srt', 'vtt')
         Tasks       = @('transcribe', 'translate')
         BestOf      = @{ Minimum = 1; Maximum = 10 }
         BeamSize    = @{ Minimum = 1; Maximum = 10 }
-        Patience    = @{ Minimum = 0.0; Maximum = 2.0 }
+        # 0 would make beam search wait for zero finished candidates
+        Patience    = @{ Minimum = 0.1; Maximum = 2.0 }
         Temperature = @{ Minimum = 0.0; Maximum = 2.0 }
     }
 }

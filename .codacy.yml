@@ -1,0 +1,9 @@
+---
+engines:
+  psscriptanalyzer:
+    enabled: true
+  lizard:
+    enabled: true
+exclude_paths:
+  - '**/*.md'
+  - '.github/**'

@@ -22,7 +22,6 @@ function Get-ConfigNumberOrDefault {
     try {
         if ($CastTo -eq 'int') { return [int]$property.Value }
         if ($CastTo -eq 'double') { return [double]$property.Value }
-        return $DefaultValue
     }
     catch {
         return $DefaultValue
